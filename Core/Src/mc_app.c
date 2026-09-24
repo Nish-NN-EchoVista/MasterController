@@ -34,6 +34,7 @@ typedef struct {
     uint32_t purged;            /* queued lines discarded by stop/cancel     */
     uint32_t stalls;            /* transmissions aborted                     */
     uint32_t up_dropped;        /* DC only: lines lost on the way to the PC  */
+    uint32_t garbled;           /* PC only: lines with non-printable bytes   */
 } counters_t;
 
 typedef struct {
@@ -182,9 +183,27 @@ static void send_normal(const mc_route_t *r, const uint8_t *out, uint16_t n,
 
 static void handle_local(const char *line, uint16_t len);
 
+/* Commands are printable ASCII. Anything else is line noise (a glitch while
+   the adapter was plugged in, a baud mismatch) and must not be broadcast. */
+static int printable(const char *s, uint16_t len)
+{
+    for (uint16_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c < 0x20u && c != '\t') || c > 0x7Eu)
+            return 0;
+    }
+    return 1;
+}
+
 static void handle_pc_line(const char *line, uint16_t len, uint32_t now)
 {
     mc_route_t r;
+    if (!printable(line, len)) {
+        ++pc()->c.garbled;
+        note_drop(now);
+        emit("E: line contains non-printable characters, not sent");
+        return;
+    }
     mc_route_pc_line(line, len, &r);
 
     if (r.kind == MC_ROUTE_LOCAL) { handle_local(line, len); return; }
@@ -251,12 +270,13 @@ static void report_status(uint32_t now)
          (unsigned long)loop_max_ms, (unsigned long)mc_lines_lost,
          (unsigned long)busy_total);
     emit("PC  %s %lu baud rx=%lu lines=%lu tx=%lu q=%u/%u overlong=%lu binary=%lu "
-         "fe=%lu ne=%lu stalls=%lu",
+         "garbled=%lu fe=%lu ne=%lu stalls=%lu",
          mc_plat_port_name(MC_PORT_PC), (unsigned long)mc_plat_port_baud(MC_PORT_PC),
          (unsigned long)p->c.rx_bytes, (unsigned long)p->c.rx_lines,
          (unsigned long)p->c.tx_lines, (unsigned)mc_txq_count(&p->txq),
          (unsigned)MC_PC_TXQ_SLOTS, (unsigned long)p->c.overlong,
-         (unsigned long)p->c.binary, (unsigned long)h.framing,
+         (unsigned long)p->c.binary, (unsigned long)p->c.garbled,
+         (unsigned long)h.framing,
          (unsigned long)h.noise, (unsigned long)(p->c.stalls));
     for (unsigned k = 1; k <= MC_NUM_DC; ++k) {
         p = dc(k);

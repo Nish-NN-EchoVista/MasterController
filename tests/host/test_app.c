@@ -265,6 +265,22 @@ static void test_pc_binary_and_overlong_never_forwarded(void)
     (void)no_nul;
 }
 
+static void test_pc_garbage_never_forwarded(void)
+{
+    boot();
+    /* A connect glitch glued onto the next command, plus a stray byte. */
+    fake_inject(PC, "\xff" "start_sweep\r\n@3 get\x80" "freq\r\n");
+    fake_inject(PC, "start_sweep\r\n@4 get\tfreq\r\n");   /* tab is fine */
+    pump(10);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        CHECK_STR(fake_out(DC(k)), k == 2 ? "start_sweep\r\n@2 get\tfreq\r\n"
+                                          : "start_sweep\r\n");
+    CHECK(count_of(fake_out(PC), "[MC] E: line contains non-printable characters") == 2);
+    fake_inject(PC, "mc_status\r\n");
+    pump(20);
+    CHECK(strstr(fake_out(PC), "garbled=2 ") != NULL);
+}
+
 static void test_dc_binary_frames_dropped(void)
 {
     boot();
@@ -433,6 +449,7 @@ int main(void)
     RUN(test_broadcast_stop_purges_everything);
     RUN(test_stop_fits_even_when_queue_full);
     RUN(test_pc_binary_and_overlong_never_forwarded);
+    RUN(test_pc_garbage_never_forwarded);
     RUN(test_dc_binary_frames_dropped);
     RUN(test_health_events);
     RUN(test_status_and_local_commands);
