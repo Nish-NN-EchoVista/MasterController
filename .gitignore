@@ -21,3 +21,8 @@
 Thumbs.db
 *~
 *.swp
+
+# Host test binaries
+tests/host/*.exe
+tests/host/test_core
+tests/host/test_app
