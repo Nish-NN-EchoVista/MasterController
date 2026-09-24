@@ -35,6 +35,7 @@ typedef struct {
     uint32_t stalls;            /* transmissions aborted                     */
     uint32_t up_dropped;        /* DC only: lines lost on the way to the PC  */
     uint32_t garbled;           /* PC only: lines with non-printable bytes   */
+    uint32_t tainted;           /* PC only: lines discarded after UART errors */
 } counters_t;
 
 typedef struct {
@@ -47,6 +48,11 @@ typedef struct {
     uint32_t      last_rx_ms;
     uint32_t      up_reported;  /* up_dropped value already reported         */
     uint32_t      up_report_ms;
+    uint32_t      err_seen;     /* raw error total at the last RX sample     */
+    uint32_t      overrun_seen; /* raw rx_overruns at the last RX sample     */
+    uint32_t      err_reported; /* raw error total already warned about      */
+    uint32_t      err_report_ms;
+    uint8_t       taint_next;   /* PC: discard the next completed line       */
     uint8_t       seen, online, missing_reported;
 } port_t;
 
@@ -258,6 +264,7 @@ static void hw_now(unsigned port, mc_hw_stats_t *d)
     d->parity      = s.parity - b->parity;
     d->rx_restarts = s.rx_restarts - b->rx_restarts;
     d->tx_aborts   = s.tx_aborts - b->tx_aborts;
+    d->rx_overruns = s.rx_overruns - b->rx_overruns;
 }
 
 static void report_status(uint32_t now)
@@ -270,14 +277,15 @@ static void report_status(uint32_t now)
          (unsigned long)loop_max_ms, (unsigned long)mc_lines_lost,
          (unsigned long)busy_total);
     emit("PC  %s %lu baud rx=%lu lines=%lu tx=%lu q=%u/%u overlong=%lu binary=%lu "
-         "garbled=%lu fe=%lu ne=%lu stalls=%lu",
+         "garbled=%lu uart_err_lines=%lu fe=%lu ne=%lu overruns=%lu stalls=%lu",
          mc_plat_port_name(MC_PORT_PC), (unsigned long)mc_plat_port_baud(MC_PORT_PC),
          (unsigned long)p->c.rx_bytes, (unsigned long)p->c.rx_lines,
          (unsigned long)p->c.tx_lines, (unsigned)mc_txq_count(&p->txq),
          (unsigned)MC_PC_TXQ_SLOTS, (unsigned long)p->c.overlong,
          (unsigned long)p->c.binary, (unsigned long)p->c.garbled,
-         (unsigned long)h.framing,
-         (unsigned long)h.noise, (unsigned long)(p->c.stalls));
+         (unsigned long)p->c.tainted, (unsigned long)h.framing,
+         (unsigned long)h.noise, (unsigned long)h.rx_overruns,
+         (unsigned long)p->c.stalls);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k) {
         p = dc(k);
         hw_now(MC_PORT_DC(k), &h);
@@ -288,7 +296,7 @@ static void report_status(uint32_t now)
             snprintf(age, sizeof age, "never");
         emit("DC%u %s %s @%u,@%u last_rx=%s rx=%lu lines=%lu up_drop=%lu tx=%lu q=%u/%u "
              "rejected=%lu purged=%lu overlong=%lu binary=%lu fe=%lu ne=%lu "
-             "dma_restarts=%lu stalls=%lu",
+             "overruns=%lu dma_restarts=%lu stalls=%lu",
              k, mc_plat_port_name(MC_PORT_DC(k)), p->online ? "online" : "OFFLINE",
              2u * k - 1u, 2u * k, age,
              (unsigned long)p->c.rx_bytes, (unsigned long)p->c.rx_lines,
@@ -297,7 +305,8 @@ static void report_status(uint32_t now)
              (unsigned long)p->c.rejected, (unsigned long)p->c.purged,
              (unsigned long)p->c.overlong, (unsigned long)p->c.binary,
              (unsigned long)h.framing, (unsigned long)h.noise,
-             (unsigned long)h.rx_restarts, (unsigned long)p->c.stalls);
+             (unsigned long)h.rx_overruns, (unsigned long)h.rx_restarts,
+             (unsigned long)p->c.stalls);
     }
 }
 
@@ -357,6 +366,9 @@ static void service_tx(unsigned port, uint32_t now)
             ++p->c.stalls;
             mc_txq_pop(&p->txq);
             note_drop(now);
+            /* Part of the aborted line may have gone out. Terminate it so it
+               cannot merge into the next line (which might be a stop).    */
+            (void)mc_txq_push(&p->txq, (const uint8_t *)"\r\n", 2u, 0, 1);
         }
         return;
     }
@@ -377,13 +389,51 @@ static void service_tx(unsigned port, uint32_t now)
     }
 }
 
+static uint32_t err_total(const mc_hw_stats_t *s)
+{
+    return s->framing + s->noise + s->parity + s->rx_overruns;
+}
+
+/*
+ * Line errors on the PC link: the UART drops a byte received with a framing
+ * or noise error, which could be a terminator (two commands merge) or a
+ * letter ("stop" becomes something else). Error flags are sampled after
+ * each read, so they cover every byte read so far. When they have moved,
+ * every line completed from that chunk, and the next line after it, is
+ * discarded rather than forwarded. This may discard a clean line, but a
+ * damaged one is never forwarded.
+ */
 static void service_rx(unsigned port, uint32_t now)
 {
     port_t *p = &ports[port];
     uint8_t buf[256];
     size_t total = 0, n;
     /* Bounded per pass so one busy port cannot starve the others. */
-    while (total < 4096u && (n = mc_plat_rx_read(port, buf, sizeof buf)) > 0u) {
+    for (;;) {
+        n = total < 4096u ? mc_plat_rx_read(port, buf, sizeof buf) : 0u;
+
+        mc_hw_stats_t hw;
+        mc_plat_hw_stats(port, &hw);            /* after the read: see above */
+        int tainted_chunk = 0;
+        if (err_total(&hw) != p->err_seen) {
+            p->err_seen = err_total(&hw);
+            if (port == MC_PORT_PC) {
+                tainted_chunk = 1;
+                p->taint_next = 1;
+            }
+        }
+        if (hw.rx_overruns != p->overrun_seen) {
+            /* Unread input may have been overwritten: never join what is
+               left of a line to whatever follows it.                     */
+            p->overrun_seen = hw.rx_overruns;
+            mc_line_init(&p->line);
+            note_drop(now);
+            emit("W: %s receive buffer may have overflowed (main loop stalled); "
+                 "partial line discarded", port == MC_PORT_PC ? "PC" : mc_plat_port_name(port));
+        }
+        if (n == 0u)
+            break;
+
         total += n;
         p->c.rx_bytes += (uint32_t)n;
         p->last_rx_ms = now;
@@ -392,10 +442,17 @@ static void service_rx(unsigned port, uint32_t now)
             mc_line_event_t e = mc_line_feed(&p->line, buf[i]);
             if (e == MC_LINE_READY) {
                 ++p->c.rx_lines;
-                if (port == MC_PORT_PC)
+                if (port == MC_PORT_PC && (tainted_chunk || p->taint_next)) {
+                    p->taint_next = 0;
+                    ++p->c.tainted;
+                    note_drop(now);
+                    emit("E: line received with UART errors, not sent: %.*s",
+                         clip(p->line.len), p->line.buf);
+                } else if (port == MC_PORT_PC) {
                     handle_pc_line(p->line.buf, p->line.len, now);
-                else
+                } else {
                     handle_dc_line(port, p->line.buf, p->line.len, now);
+                }
             } else if (e == MC_LINE_OVERLONG) {
                 ++p->c.overlong;
                 note_drop(now);
@@ -408,12 +465,35 @@ static void service_rx(unsigned port, uint32_t now)
                          "MasterController, frame discarded");
             }
         }
+        if (tainted_chunk)
+            p->taint_next = 1;      /* the damage may lie in the next line */
     }
+}
+
+/* At most one warning per port per interval while line errors keep rising. */
+static void report_line_errors(unsigned port, uint32_t now)
+{
+    port_t *p = &ports[port];
+    if (p->err_seen == p->err_reported ||
+        elapsed(now, p->err_report_ms) < MC_WARN_INTERVAL_MS)
+        return;
+    uint32_t delta = p->err_seen - p->err_reported;
+    p->err_reported = p->err_seen;
+    p->err_report_ms = now;
+    if (port == MC_PORT_PC)
+        emit("W: PC link: %lu UART error(s); affected lines discarded "
+             "(check adapter, baud %lu, ground)", (unsigned long)delta,
+             (unsigned long)mc_plat_port_baud(port));
+    else
+        emit("W: DC%u %s: %lu UART error(s) (check wiring, ground, baud %lu)",
+             port, mc_plat_port_name(port), (unsigned long)delta,
+             (unsigned long)mc_plat_port_baud(port));
 }
 
 static void service_health(uint32_t now)
 {
     int after_grace = elapsed(now, boot_ms) >= MC_STARTUP_GRACE_MS;
+    report_line_errors(MC_PORT_PC, now);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k) {
         port_t *p = dc(k);
         int alive = p->seen && elapsed(now, p->last_rx_ms) < MC_DC_SILENT_MS;
@@ -428,6 +508,7 @@ static void service_health(uint32_t now)
             p->missing_reported = 1;
             emit("W: DC%u not detected on %s", k, mc_plat_port_name(MC_PORT_DC(k)));
         }
+        report_line_errors(MC_PORT_DC(k), now);
         if (p->c.up_dropped != p->up_reported &&
             elapsed(now, p->up_report_ms) >= MC_WARN_INTERVAL_MS) {
             emit("W: PC link congested, %lu line(s) from DC%u dropped",
@@ -462,6 +543,14 @@ void mc_app_init(void)
     last_activity_ms = boot_ms;
     status_requested = 0;
     reset_stats(boot_ms);
+    /* Errors counted before this boot of the app are not "new". */
+    for (unsigned i = 0; i < MC_NUM_PORTS; ++i) {
+        if (!mc_plat_port_present(i)) continue;
+        mc_hw_stats_t hw;
+        mc_plat_hw_stats(i, &hw);
+        ports[i].err_seen = ports[i].err_reported = err_total(&hw);
+        ports[i].overrun_seen = hw.rx_overruns;
+    }
 
     emit("MasterController %s ready (reset: %s). %u DataControllers, EVS2 @1..@%u. "
          "Type mc_help.", MC_FW_VERSION, mc_plat_reset_cause(),

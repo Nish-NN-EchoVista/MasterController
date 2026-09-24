@@ -96,13 +96,34 @@ Lines produced by the MasterController itself start with `[MC] `
     `[MC] W: 'stop' discarded 3 queued line(s) for DC2`.
   - Queue space is reserved, so a stop still fits when the queue is
     otherwise full.
+  - Urgent lines are never discarded by a later stop. Several stops in a
+    row go out in the order they were sent.
+  - Discarding is per DataController. For example, `@1 stop` also discards
+    a queued broadcast on DC1, even if that broadcast has already reached
+    the other five DataControllers. The discard is always reported.
+- **Damaged input is never forwarded.** If the laptop link reports a
+  framing or noise error, the UART has dropped a byte. That byte might
+  have been a line ending, which merges two commands, or a letter, which
+  could turn `stop` into something else. So the lines received around the
+  error are discarded with `[MC] E: line received with UART errors, not
+  sent: …`. This can occasionally discard a clean line, but a damaged one
+  is never forwarded. Errors on DataController links are counted and
+  warned about (at most once per second per port).
 - **Nothing is lost silently.** Every drop is counted in `mc_status` and
   reported as an `[MC]` line. `[MC]` replies have their own reserved PC
   queue space, so they get through even when the PC link is congested.
 - **Nothing blocks.** Reception is DMA into ring buffers that never stop,
-  even on framing or noise errors. All routing runs in the main loop. The
-  watchdog resets the board if the main loop ever stalls for about 1 s, and
-  the next boot reports why.
+  even on framing or noise errors.
+  - A stopped DMA stream is restarted, including re-initialising its
+    handle if needed. If it can't be restarted after 50 tries, the board
+    resets and reports `DMA_FAILURE`.
+  - All routing runs in the main loop. The watchdog resets the board if the
+    main loop ever stalls for about 1 s, and the next boot reports why.
+  - Each DataController ring holds more than the watchdog timeout of input.
+  - The laptop ring holds about 0.5 s. A longer stall is reported, and the
+    affected partial line is discarded rather than joined to the next one.
+  - If a transmission ever stalls, it is aborted and followed by CRLF, so
+    a partial line cannot merge into the next command.
 - **Binary protocol frames are not forwarded.** They are the
   DataController's experimental COBS protocol, delimited by `0x00`. v1 is
   text only. Frames from either direction are discarded and counted, and
@@ -166,7 +187,10 @@ stm32cubeidec.exe --launcher.suppressErrors -nosplash -application org.eclipse.c
 ```
 
 In Debug builds the watchdog is frozen while the core is halted, so
-breakpoints don't cause resets.
+breakpoints don't cause resets. **Flash the Release build for deployment.**
+
+A fault always resets the board, whether or not a debugger was attached.
+To inspect a fault, set a breakpoint on `mc_board_fatal`.
 
 ### Host unit tests
 

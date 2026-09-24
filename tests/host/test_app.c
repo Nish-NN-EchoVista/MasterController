@@ -219,6 +219,22 @@ static void test_broadcast_stop_purges_everything(void)
     CHECK_STR(fake_out(DC(6)), "start_sweep\r\nstop\r\n");
 }
 
+static void test_later_stop_never_discards_earlier_stop(void)
+{
+    boot();
+    fake_tx_mode(DC(1), FAKE_TX_HOLD);
+    fake_inject(PC, "@1 long_running_command\r\n");
+    pump(2);
+    fake_inject(PC, "@1 queued\r\n@0 stop_all\r\n");
+    pump(2);
+    fake_inject(PC, "cancel\r\n@2 stop\r\n");
+    pump(3);
+    while (fake_complete(DC(1))) pump(1);
+    pump(2);
+    CHECK_STR(fake_out(DC(1)),
+              "@1 long_running_command\r\n@0 stop_all\r\ncancel\r\n@2 stop\r\n");
+}
+
 static void test_stop_fits_even_when_queue_full(void)
 {
     boot();
@@ -281,6 +297,68 @@ static void test_pc_garbage_never_forwarded(void)
     CHECK(strstr(fake_out(PC), "garbled=2 ") != NULL);
 }
 
+static void test_pc_uart_errors_discard_affected_lines(void)
+{
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    boot();
+    fake_inject(PC, "@1 before\r\n");
+    pump(3);
+    /* A framing error is flagged while these bytes are being read. */
+    fake_inject(PC, "@1 damaged\r\n@1 par");
+    hw.framing = 1;
+    fake_set_hw(PC, &hw);
+    pump(1);
+    fake_inject(PC, "tial\r\n@1 next\r\n@1 after\r\n");
+    pump(10);
+    /* The damaged chunk, the line straddling it, then the rest resumes. */
+    CHECK_STR(fake_out(DC(1)), "@1 before\r\n@1 next\r\n@1 after\r\n");
+    CHECK(strstr(fake_out(PC), "[MC] E: line received with UART errors, not sent: @1 damaged") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] E: line received with UART errors, not sent: @1 partial") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] W: PC link: 1 UART error(s)") != NULL);
+
+    /* A clean line after an error-free poll goes straight through. */
+    fake_out_clear(DC(1));
+    fake_inject(PC, "@1 clean\r\n");
+    pump(3);
+    CHECK_STR(fake_out(DC(1)), "@1 clean\r\n");
+}
+
+static void test_dc_uart_errors_warned_not_blocked(void)
+{
+    mc_hw_stats_t hw = { 3, 2, 0, 0, 0, 0 };
+    boot();
+    fake_set_hw(DC(4), &hw);
+    fake_inject(DC(4), "[ESV2-1] still forwarded\r\n");
+    pump(10);
+    CHECK(strstr(fake_out(PC), "[ESV2-7] still forwarded\r\n") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] W: DC4 DC4: 5 UART error(s)") != NULL);
+    /* Rate limited: more errors within the interval give no new warning. */
+    fake_out_clear(PC);
+    hw.framing = 10;
+    fake_set_hw(DC(4), &hw);
+    pump(10);
+    CHECK(strstr(fake_out(PC), "UART error") == NULL);
+    fake_advance(MC_WARN_INTERVAL_MS);
+    fake_inject(DC(4), "PZT Temp: 1\r\n");
+    pump(10);
+    CHECK(strstr(fake_out(PC), "[MC] W: DC4 DC4: 7 UART error(s)") != NULL);
+}
+
+static void test_rx_overrun_discards_partial_line(void)
+{
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    boot();
+    fake_inject(DC(2), "[ESV2-1] first half of a li");
+    pump(2);
+    hw.rx_overruns = 1;                 /* main loop stalled: data lost */
+    fake_set_hw(DC(2), &hw);
+    fake_inject(DC(2), "ne\r\n[ESV2-2] whole\r\n");
+    pump(10);
+    CHECK(strstr(fake_out(PC), "first half") == NULL);
+    CHECK(strstr(fake_out(PC), "[ESV2-4] whole\r\n") != NULL);
+    CHECK(strstr(fake_out(PC), "receive buffer may have overflowed") != NULL);
+}
+
 static void test_dc_binary_frames_dropped(void)
 {
     boot();
@@ -326,7 +404,7 @@ static void test_health_events(void)
 static void test_status_and_local_commands(void)
 {
     boot();
-    mc_hw_stats_t hw = { 7, 1, 0, 2, 0 };
+    mc_hw_stats_t hw = { 7, 1, 0, 2, 0, 0 };
     fake_set_hw(DC(5), &hw);
     fake_inject(PC, "mc_status\r\n");
     pump(20);
@@ -335,7 +413,7 @@ static void test_status_and_local_commands(void)
     CHECK(strstr(o, "[MC] PC  PC 921600 baud") != NULL);
     CHECK(strstr(o, "[MC] DC1 DC1 online @1,@2") != NULL);
     CHECK(strstr(o, "[MC] DC6 DC6 online @11,@12") != NULL);
-    CHECK(strstr(o, "fe=7 ne=1 dma_restarts=2") != NULL);
+    CHECK(strstr(o, "fe=7 ne=1 overruns=0 dma_restarts=2") != NULL);
 
     fake_out_clear(PC);
     fake_inject(PC, "mc_reset_stats\r\nmc_status\r\n");
@@ -367,7 +445,8 @@ static void test_tx_stall_recovers(void)
     CHECK(fake_aborts(DC(2)) == 1);
     fake_tx_mode(DC(2), FAKE_TX_AUTO);
     pump(5);
-    CHECK_STR(fake_out(DC(2)), "@1 two\r\n");
+    /* A CRLF terminates whatever part of "one" escaped before the abort. */
+    CHECK_STR(fake_out(DC(2)), "\r\n@1 two\r\n");
     fake_inject(PC, "mc_status\r\n");
     pump(20);
     CHECK(strstr(fake_out(PC), "stalls=1") != NULL);
@@ -447,9 +526,13 @@ int main(void)
     RUN(test_broadcast_all_or_nothing);
     RUN(test_stop_overtakes_and_purges_same_board);
     RUN(test_broadcast_stop_purges_everything);
+    RUN(test_later_stop_never_discards_earlier_stop);
     RUN(test_stop_fits_even_when_queue_full);
     RUN(test_pc_binary_and_overlong_never_forwarded);
     RUN(test_pc_garbage_never_forwarded);
+    RUN(test_pc_uart_errors_discard_affected_lines);
+    RUN(test_dc_uart_errors_warned_not_blocked);
+    RUN(test_rx_overrun_discards_partial_line);
     RUN(test_dc_binary_frames_dropped);
     RUN(test_health_events);
     RUN(test_status_and_local_commands);

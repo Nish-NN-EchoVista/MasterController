@@ -39,8 +39,14 @@ extern UART_HandleTypeDef huart2, huart10, huart7, huart4, huart5, huart9, huart
 extern UART_HandleTypeDef hcom_uart[COMn];
 extern IWDG_HandleTypeDef hiwdg1;
 
-#define PC_RX_BYTES   16384u   /* ~178 ms of continuous input at 921600 */
-#define DC_RX_BYTES   4096u    /* ~711 ms of continuous input at 57600  */
+/* Ring sizes (DMA NDTR is 16-bit, so at most 65535). A DC ring holds more
+   than the watchdog timeout of input, so it cannot be overrun without the
+   board resetting first. The PC ring holds ~533 ms; longer main-loop
+   stalls are detected and reported (rx_overruns).                          */
+#define PC_RX_BYTES   49152u   /* ~533 ms of continuous input at 921600 */
+#define DC_RX_BYTES   8192u    /* ~1.4 s of continuous input at 57600   */
+/* Consecutive failed DMA restarts before the board resets itself. */
+#define DMA_RESTART_LIMIT 50u
 
 #define FAULT_MAGIC   0xFA170000u
 #define FAULT_MASK    0xFFFF0000u
@@ -52,6 +58,8 @@ typedef struct {
     uint8_t            *rx_buf;        /* NULL for TX-only ports             */
     uint16_t            rx_size;
     uint16_t            rx_tail;
+    uint32_t            rx_ring_ms;    /* time to fill the ring at line rate */
+    uint32_t            rx_fail_run;   /* consecutive failed restarts        */
     volatile uint8_t    tx_busy;
     mc_hw_stats_t       hw;
 } plat_port_t;
@@ -62,13 +70,15 @@ static uint8_t rx_dc[MC_NUM_DC][DC_RX_BYTES] __attribute__((aligned(32)));
 static plat_port_t P[MC_NUM_PORTS];
 static uint8_t     ready;
 static char        reset_cause[24];
+static uint32_t    last_poll_ms;
 
 /* ---------------------------------------------------------- reset cause */
 
 static void capture_reset_cause(void)
 {
     static const char *faults[] = {
-        "", "ERROR_HANDLER", "HARDFAULT", "MEMMANAGE", "BUSFAULT", "USAGEFAULT", "NMI" };
+        "", "ERROR_HANDLER", "HARDFAULT", "MEMMANAGE", "BUSFAULT", "USAGEFAULT", "NMI",
+        "DMA_FAILURE" };
     const char *why = "UNKNOWN";
 
     __HAL_RCC_RTC_CLK_ENABLE();                /* TAMP backup register access */
@@ -91,23 +101,36 @@ static void capture_reset_cause(void)
     strncpy(reset_cause, why, sizeof reset_cause - 1u);
 }
 
+/* Always resets. There is deliberately no breakpoint here: DHCSR.C_DEBUGEN
+   stays set after an ST-LINK session until power is cycled, so a "halt if
+   a debugger is attached" test would hang a board left running after
+   flashing. To inspect a fault, set a breakpoint on this function.         */
 void mc_board_fatal(mc_fault_t why)
 {
     __disable_irq();
     RCC->APB4ENR |= RCC_APB4ENR_RTCAPBEN;
+    (void)RCC->APB4ENR;                        /* clock enable takes effect */
     PWR->CR1 |= PWR_CR1_DBP;
-    __DSB();
+    for (unsigned i = 0; i < 1000u && !(PWR->CR1 & PWR_CR1_DBP); ++i) { }
     TAMP->BKP0R = FAULT_MAGIC | (uint32_t)why;
     __DSB();
-    /* With a debugger attached, stop here so the fault can be inspected. */
-    if (CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk)
-        __BKPT(0);
     NVIC_SystemReset();
 }
 
 /* --------------------------------------------------------------- receive */
 
-static void rx_start(plat_port_t *p)
+static HAL_StatusTypeDef dma_start(plat_port_t *p)
+{
+    return HAL_DMA_Start(p->h->hdmarx, (uint32_t)&p->h->Instance->RDR,
+                         (uint32_t)p->rx_buf, p->rx_size);
+}
+
+/* (Re)start reception. Returns 1 on success.
+   HAL_DMA_Abort leaves the handle in HAL_DMA_STATE_ERROR if the stream does
+   not stop within its timeout, and HAL_DMA_Start refuses anything but
+   READY, so a failed start re-initialises the handle from its saved Init
+   (circular, byte, DMAMUX request) and tries once more.                    */
+static int rx_start(plat_port_t *p)
 {
     UART_HandleTypeDef *h = p->h;
     DMA_HandleTypeDef  *d = h->hdmarx;
@@ -117,9 +140,13 @@ static void rx_start(plat_port_t *p)
     p->rx_tail = 0;
     __HAL_UART_CLEAR_FLAG(h, UART_CLEAR_OREF | UART_CLEAR_NEF |
                              UART_CLEAR_FEF | UART_CLEAR_PEF);
-    if (HAL_DMA_Start(d, (uint32_t)&h->Instance->RDR, (uint32_t)p->rx_buf,
-                      p->rx_size) == HAL_OK)
-        SET_BIT(h->Instance->CR3, USART_CR3_DMAR);
+    if (dma_start(p) != HAL_OK) {
+        (void)HAL_DMA_DeInit(d);
+        if (HAL_DMA_Init(d) != HAL_OK || dma_start(p) != HAL_OK)
+            return 0;
+    }
+    SET_BIT(h->Instance->CR3, USART_CR3_DMAR);
+    return 1;
 }
 
 static uint16_t rx_head(const plat_port_t *p)
@@ -148,8 +175,8 @@ size_t mc_plat_rx_read(unsigned port, uint8_t *dst, size_t max)
     return n;
 }
 
-/* Count and clear line errors; restart reception if it has stopped. */
-static void service_port(plat_port_t *p)
+/* Count and clear line-error flags. */
+static void poll_flags(plat_port_t *p)
 {
     USART_TypeDef *u = p->h->Instance;
     uint32_t isr = u->ISR;
@@ -157,9 +184,23 @@ static void service_port(plat_port_t *p)
     if (isr & USART_ISR_NE)  { ++p->hw.noise;   u->ICR = USART_ICR_NECF; }
     if (isr & USART_ISR_PE)  { ++p->hw.parity;  u->ICR = USART_ICR_PECF; }
     if (isr & USART_ISR_ORE) { u->ICR = USART_ICR_ORECF; }   /* OVRDIS: never */
-    if (p->rx_buf && !rx_running(p)) {
-        rx_start(p);
+}
+
+/* Poll line errors; restart reception if it has stopped; flag a main-loop
+   stall long enough to have overwritten unread input.                     */
+static void service_port(plat_port_t *p, uint32_t gap_ms)
+{
+    poll_flags(p);
+    if (!p->rx_buf)
+        return;
+    if (gap_ms >= p->rx_ring_ms)
+        ++p->hw.rx_overruns;
+    if (!rx_running(p)) {
         ++p->hw.rx_restarts;
+        if (rx_start(p))
+            p->rx_fail_run = 0;
+        else if (++p->rx_fail_run >= DMA_RESTART_LIMIT)
+            mc_board_fatal(MC_FAULT_DMA);       /* a reset restores all DMA */
     }
 }
 
@@ -175,7 +216,7 @@ int mc_plat_tx_start(unsigned port, const uint8_t *data, uint16_t len)
     if (port >= MC_NUM_PORTS || !P[port].h || P[port].tx_busy) return 0;
     plat_port_t *p = &P[port];
     p->tx_busy = 1;
-    if (HAL_UART_Transmit_IT(p->h, (uint8_t *)(uintptr_t)data, len) != HAL_OK) {
+    if (HAL_UART_Transmit_IT(p->h, data, len) != HAL_OK) {
         p->tx_busy = 0;
         return 0;
     }
@@ -238,10 +279,16 @@ uint32_t mc_plat_port_baud(unsigned port)
     return port < MC_NUM_PORTS ? P[port].baud : 0u;
 }
 
+/* Samples the error flags now, so a caller that reads bytes first and then
+   calls this sees every error that affected those bytes.                  */
 void mc_plat_hw_stats(unsigned port, mc_hw_stats_t *out)
 {
-    if (port < MC_NUM_PORTS) *out = P[port].hw;
-    else memset(out, 0, sizeof *out);
+    if (port < MC_NUM_PORTS && P[port].h) {
+        poll_flags(&P[port]);
+        *out = P[port].hw;
+    } else {
+        memset(out, 0, sizeof *out);
+    }
 }
 
 const char *mc_plat_reset_cause(void) { return reset_cause; }
@@ -257,6 +304,8 @@ static void port_setup(unsigned i, UART_HandleTypeDef *h, const char *name,
     p->baud = h->Init.BaudRate;
     p->rx_buf = rx;
     p->rx_size = rx_size;
+    /* Conservative: 3/4 of the time it takes to fill the ring at 10 bits/byte. */
+    p->rx_ring_ms = rx_size ? (uint32_t)((uint64_t)rx_size * 10000u * 3u / 4u / p->baud) : 0u;
 
     /* FIFO mode: the TX interrupt refills 8 bytes at a time. */
     (void)HAL_UARTEx_SetTxFifoThreshold(h, UART_TXFIFO_THRESHOLD_1_2);
@@ -269,8 +318,8 @@ static void port_setup(unsigned i, UART_HandleTypeDef *h, const char *name,
     SET_BIT(h->Instance->CR3, USART_CR3_OVRDIS);
     __HAL_UART_ENABLE(h);
 
-    if (rx)
-        rx_start(p);
+    if (rx && !rx_start(p))
+        mc_board_fatal(MC_FAULT_DMA);
 }
 
 void mc_board_init(void)
@@ -293,6 +342,7 @@ void mc_board_init(void)
     HAL_NVIC_EnableIRQ(USART3_IRQn);
 
     ready = 1;
+    last_poll_ms = HAL_GetTick();
     BSP_LED_Off(LED_GREEN);
     BSP_LED_Off(LED_YELLOW);
     BSP_LED_Off(LED_RED);
@@ -313,10 +363,12 @@ static void service_leds(uint32_t now)
 void mc_board_poll(void)
 {
     uint32_t start = HAL_GetTick();
+    uint32_t gap = start - last_poll_ms;
+    last_poll_ms = start;
 
     for (unsigned i = 0; i < MC_NUM_PORTS; ++i)
         if (P[i].h)
-            service_port(&P[i]);
+            service_port(&P[i], gap);
     mc_app_poll();
     service_leds(start);
 

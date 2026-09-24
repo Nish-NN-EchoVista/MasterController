@@ -10,6 +10,9 @@
  *    order, never more than max. Reception never stops on line errors.
  *  - mc_plat_tx_start() begins sending exactly len bytes from data. The
  *    buffer must stay untouched until mc_plat_tx_busy() reports 0.
+ *  - mc_plat_hw_stats() samples the line-error flags at the time of the
+ *    call: every error affecting bytes already returned by mc_plat_rx_read()
+ *    is included.
  */
 #ifndef MC_PLATFORM_H
 #define MC_PLATFORM_H
@@ -23,6 +26,8 @@ typedef struct {
     uint32_t parity;       /* PE (should stay 0: no parity is configured)        */
     uint32_t rx_restarts;  /* receive DMA found stopped and restarted            */
     uint32_t tx_aborts;    /* stalled transmissions aborted                      */
+    uint32_t rx_overruns;  /* main loop stalled long enough that the RX ring may
+                              have been overwritten                              */
 } mc_hw_stats_t;
 
 uint32_t    mc_plat_now_ms(void);

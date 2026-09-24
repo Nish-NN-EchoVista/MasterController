@@ -78,6 +78,37 @@ static void test_txq_urgent_never_displaces_locked_head(void)
     CHECK_STR(q_drain(), "STOP");
 }
 
+static void test_txq_urgent_runs_keep_order_and_survive_purge(void)
+{
+    q_reset();
+    q_push("a", MC_TAG_BOTH, 0);
+    mc_txq_lock_head(&q);
+    q_push("b", MC_TAG_BOTH, 0);
+    CHECK(q_push("U1", MC_TAG_BOTH, 1));
+    CHECK(mc_txq_purge(&q, MC_TAG_BOTH) == 1);     /* only "b"             */
+    CHECK(q_push("U2", MC_TAG_BOTH, 1));
+    CHECK(mc_txq_purge(&q, MC_TAG_BOTH) == 0);     /* urgent is immune     */
+    CHECK_STR(q_drain(), "a,U1,U2");
+
+    /* Unlocked head: urgent run goes first, in arrival order. */
+    q_reset();
+    q_push("x", 1, 0); q_push("y", 1, 0);
+    CHECK(q_push("U1", 1, 1));
+    CHECK(q_push("U2", 1, 1));
+    CHECK_STR(q_drain(), "U1,U2,x,y");
+
+    /* Works across the ring wrap point. */
+    q_reset();
+    q_push("p", 1, 0); q_push("q", 1, 0); q_push("r", 1, 0);
+    mc_txq_pop(&q); mc_txq_pop(&q);
+    mc_txq_lock_head(&q);                          /* "r" at ring index 2  */
+    q_push("s", 1, 0);
+    CHECK(q_push("U1", 1, 1));
+    CHECK(q_push("U2", 1, 1));
+    CHECK(!q_push("U3", 1, 1));                    /* full at cap 4        */
+    CHECK_STR(q_drain(), "r,U1,U2,s");
+}
+
 static void test_txq_purge_by_mask(void)
 {
     q_reset();
@@ -324,6 +355,7 @@ int main(void)
     RUN(test_txq_rejects_bad_lengths);
     RUN(test_txq_urgent_unlocked_goes_first);
     RUN(test_txq_urgent_never_displaces_locked_head);
+    RUN(test_txq_urgent_runs_keep_order_and_survive_purge);
     RUN(test_txq_purge_by_mask);
     RUN(test_line_terminators);
     RUN(test_line_overlong_dropped_whole);

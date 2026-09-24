@@ -38,20 +38,25 @@ int mc_txq_push(mc_txq_t *q, const uint8_t *data, uint16_t len,
     memcpy(slot->data, data, len);
     slot->len = len;
     slot->tag = tag;
+    slot->urgent = (uint8_t)(urgent != 0);
 
-    if (!urgent || q->count == 0u) {
+    if (!urgent) {
         q->order[ring_at(q, q->count)] = s;
-    } else if (!q->head_locked) {
-        /* Becomes the new head. */
-        q->head = (uint16_t)((q->head + q->cap - 1u) % q->cap);
-        q->order[q->head] = s;
-    } else {
-        /* Slide the locked head back one position and slot in behind it. */
-        uint16_t locked = q->order[q->head];
-        q->head = (uint16_t)((q->head + q->cap - 1u) % q->cap);
-        q->order[q->head] = locked;
-        q->order[ring_at(q, 1u)] = s;
+        ++q->count;
+        return 1;
     }
+
+    /* Position: after the locked head and after earlier urgent entries. */
+    uint16_t pos = q->head_locked ? 1u : 0u;
+    while (pos < q->count && q->slots[q->order[ring_at(q, pos)]].urgent)
+        ++pos;
+
+    /* Open a gap at pos by moving the head back one place and shifting the
+       first pos entries down into the space that frees.                    */
+    q->head = (uint16_t)((q->head + q->cap - 1u) % q->cap);
+    for (uint16_t i = 0; i < pos; ++i)
+        q->order[ring_at(q, i)] = q->order[ring_at(q, (uint16_t)(i + 1u))];
+    q->order[ring_at(q, pos)] = s;
     ++q->count;
     return 1;
 }
@@ -84,7 +89,7 @@ uint16_t mc_txq_purge(mc_txq_t *q, uint8_t mask)
     uint16_t kept = 0, removed = 0;
     for (uint16_t pos = 0; pos < q->count; ++pos) {
         uint16_t s = q->order[ring_at(q, pos)];
-        int protect = (pos == 0u && q->head_locked);
+        int protect = (pos == 0u && q->head_locked) || q->slots[s].urgent;
         if (!protect && (q->slots[s].tag & mask)) {
             q->free_stack[q->free_count++] = s;
             ++removed;
