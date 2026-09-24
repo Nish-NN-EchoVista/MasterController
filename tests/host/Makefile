@@ -23,6 +23,11 @@ test_core$(EXE): test_core.c $(CORE) mc_test.h
 test_app$(EXE): test_app.c fake_platform.c fake_platform.h $(CORE) $(SRC)/mc_app.c mc_test.h
 	$(CC) $(CFLAGS) -o $@ test_app.c fake_platform.c $(CORE) $(SRC)/mc_app.c
 
+# Interactive simulator: the real core behind a TCP socket, DC ports looped back.
+SIMLIBS := $(if $(filter Windows_NT,$(OS)),-lws2_32,)
+mc_sim$(EXE): mc_sim.c $(CORE) $(SRC)/mc_app.c
+	$(CC) $(CFLAGS) -Wno-conversion -o $@ mc_sim.c $(CORE) $(SRC)/mc_app.c $(SIMLIBS)
+
 run: $(addsuffix $(EXE),$(TESTS))
 	./test_core$(EXE)
 	./test_app$(EXE)
