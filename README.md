@@ -215,6 +215,40 @@ with a duplicate symbol.
 - **Unused peripherals:** TIM1 and the RTC are initialised but unused. The
   RTC's backup domain holds the fault reason across resets.
 
+## Loopback test (no DataControllers needed)
+
+1. Put a jumper from TX to RX on every DataController port:
+   PE3→PE2, PF7→PF6, PA0→PA1, PB13→PB12, PD15→PD14, PC6→PC7.
+2. Run:
+
+   ```bash
+   python tools/loopback_test.py COM7
+   ```
+
+   Replace COM7 with the laptop adapter's port. The script needs pyserial.
+
+It checks:
+- Every `@1`…`@12` and `#1`…`#6` route.
+- Broadcast lines arrive at all six DataControllers exactly once.
+- Back-to-back bursts to all 12 boards arrive whole and in order.
+- A stop overtakes and discards queued lines.
+- Framing, noise, drop and stall counters all stay at zero.
+
+The same script runs against the **host simulator**, which is the real
+routing core with emulated wire speeds and looped-back DC ports:
+
+```bash
+make -C tests/host mc_sim
+```
+
+```bash
+tests/host/mc_sim 5555
+```
+
+```bash
+python tools/loopback_test.py socket://localhost:5555
+```
+
 ## Commissioning checklist
 
 1. Flash, then open the ST-LINK VCP at 115200. You should see
