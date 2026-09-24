@@ -48,11 +48,21 @@ typedef struct {
     uint32_t      last_rx_ms;
     uint32_t      up_reported;  /* up_dropped value already reported         */
     uint32_t      up_report_ms;
-    uint32_t      err_seen;     /* raw error total at the last RX sample     */
-    uint32_t      overrun_seen; /* raw rx_overruns at the last RX sample     */
-    uint32_t      err_reported; /* raw error total already warned about      */
+    uint32_t      err_seen;     /* raw line-error total at the last sample   */
+    uint32_t      overrun_seen; /* raw rx_overruns at the last sample        */
+    uint32_t      restart_seen; /* raw rx_restarts at the last sample        */
+    uint32_t      err_reported; /* raw line-error total already warned about */
     uint32_t      err_report_ms;
-    uint8_t       taint_next;   /* PC: discard the next completed line       */
+    uint32_t      discont_ms;   /* last "input lost" warning                 */
+    /* Stream positions, in bytes since boot (wrap-safe comparisons).       */
+    uint32_t      rx_pulled;    /* bytes returned by mc_plat_rx_read()       */
+    uint32_t      rx_pos;       /* bytes fed to the line assembler           */
+    uint32_t      boundary;     /* position just after the last line end     */
+    uint32_t      taint_until;  /* PC: newest byte received at the last error */
+    uint32_t      taint_ms;     /* PC: when that error was seen              */
+    uint32_t      line_first_ms;/* when the current line's first byte came   */
+    uint8_t       taint_active;
+    uint8_t       discont_armed;
     uint8_t       seen, online, missing_reported;
 } port_t;
 
@@ -77,7 +87,7 @@ static uint32_t boot_ms, last_activity_ms, last_drop_ms, loop_max_ms;
 static uint32_t mc_lines_lost;         /* [MC] replies that found no room   */
 static uint8_t  had_drop;
 static volatile uint8_t status_requested;
-static ratelimit_t rl_busy, rl_pc_binary, rl_pc_overlong;
+static ratelimit_t rl_busy, rl_pc_binary, rl_pc_overlong, rl_tainted;
 static uint32_t busy_total;
 
 static port_t *pc(void)            { return &ports[MC_PORT_PC]; }
@@ -366,9 +376,10 @@ static void service_tx(unsigned port, uint32_t now)
             ++p->c.stalls;
             mc_txq_pop(&p->txq);
             note_drop(now);
-            /* Part of the aborted line may have gone out. Terminate it so it
-               cannot merge into the next line (which might be a stop).    */
-            (void)mc_txq_push(&p->txq, (const uint8_t *)"\r\n", 2u, 0, 1);
+            /* Part of the aborted line may have gone out. Terminate it before
+               anything else is sent, including queued stops, so it cannot
+               merge into the next line.                                    */
+            (void)mc_txq_push_front(&p->txq, (const uint8_t *)"\r\n", 2u, 0);
         }
         return;
     }
@@ -389,19 +400,55 @@ static void service_tx(unsigned port, uint32_t now)
     }
 }
 
-static uint32_t err_total(const mc_hw_stats_t *s)
+static uint32_t line_errors(const mc_hw_stats_t *s)
 {
-    return s->framing + s->noise + s->parity + s->rx_overruns;
+    return s->framing + s->noise + s->parity;
+}
+
+/* Signed distance between two stream positions (wrap-safe). */
+static int32_t pos_diff(uint32_t a, uint32_t b) { return (int32_t)(a - b); }
+
+/* Mark everything received so far as possibly damaged. The damage lies at
+   or before the newest byte received: those already read plus those still
+   waiting in the ring (sampled after the error flags, see mc_platform.h). */
+static void taint_received(port_t *p, unsigned port, uint32_t now)
+{
+    uint32_t until = p->rx_pulled + (uint32_t)mc_plat_rx_pending(port);
+    if (!p->taint_active || pos_diff(until, p->taint_until) > 0)
+        p->taint_until = until;
+    p->taint_ms = now;
+    p->taint_active = 1;
+}
+
+/* Could a PC line that began at stream position start (its first byte fed
+   at first_ms) contain the byte lost to the recorded UART error?          */
+static int line_tainted(const port_t *p, uint32_t start, uint32_t first_ms)
+{
+    if (!p->taint_active)
+        return 0;
+    int32_t d = pos_diff(start, p->taint_until);
+    if (d < 0)
+        return 1;                    /* holds bytes received before the error */
+    return d == 0 && elapsed(first_ms, p->taint_ms) < MC_TAINT_GRACE_MS;
 }
 
 /*
- * Line errors on the PC link: the UART drops a byte received with a framing
- * or noise error, which could be a terminator (two commands merge) or a
- * letter ("stop" becomes something else). Error flags are sampled after
- * each read, so they cover every byte read so far. When they have moved,
- * every line completed from that chunk, and the next line after it, is
- * discarded rather than forwarded. This may discard a clean line, but a
- * damaged one is never forwarded.
+ * Receive integrity.
+ *
+ * Line errors (PC link): the UART drops a byte received with a framing or
+ * noise error. It could be a terminator (two commands merge) or a letter
+ * ("stop" becomes something else). The error flags do not say where in the
+ * stream the byte was, only that it was received before the flags were
+ * sampled. So every line holding a byte received before that moment is
+ * discarded, and so is a line starting exactly there if its first byte
+ * arrives within MC_TAINT_GRACE_MS (the lost byte may have been its first
+ * character). This may discard clean lines, but a damaged line is never
+ * forwarded, however much input was buffered.
+ *
+ * Discontinuities (any port): a DMA restart or a ring overrun loses input
+ * at an unknown point. The line assembler is resynchronised, discarding up
+ * to the next terminator, so the tail of a line can never be taken as a
+ * complete line. Input after that terminator follows the loss and is kept.
  */
 static void service_rx(unsigned port, uint32_t now)
 {
@@ -411,25 +458,28 @@ static void service_rx(unsigned port, uint32_t now)
     /* Bounded per pass so one busy port cannot starve the others. */
     for (;;) {
         n = total < 4096u ? mc_plat_rx_read(port, buf, sizeof buf) : 0u;
+        p->rx_pulled += (uint32_t)n;
 
         mc_hw_stats_t hw;
         mc_plat_hw_stats(port, &hw);            /* after the read: see above */
-        int tainted_chunk = 0;
-        if (err_total(&hw) != p->err_seen) {
-            p->err_seen = err_total(&hw);
-            if (port == MC_PORT_PC) {
-                tainted_chunk = 1;
-                p->taint_next = 1;
-            }
+        if (line_errors(&hw) != p->err_seen) {
+            p->err_seen = line_errors(&hw);
+            if (port == MC_PORT_PC)
+                taint_received(p, port, now);
         }
-        if (hw.rx_overruns != p->overrun_seen) {
-            /* Unread input may have been overwritten: never join what is
-               left of a line to whatever follows it.                     */
+        if (hw.rx_overruns != p->overrun_seen || hw.rx_restarts != p->restart_seen) {
+            int restarted = hw.rx_restarts != p->restart_seen;
             p->overrun_seen = hw.rx_overruns;
-            mc_line_init(&p->line);
+            p->restart_seen = hw.rx_restarts;
+            mc_line_resync(&p->line);
             note_drop(now);
-            emit("W: %s receive buffer may have overflowed (main loop stalled); "
-                 "partial line discarded", port == MC_PORT_PC ? "PC" : mc_plat_port_name(port));
+            if (!p->discont_armed || elapsed(now, p->discont_ms) >= MC_WARN_INTERVAL_MS) {
+                p->discont_armed = 1;
+                p->discont_ms = now;
+                emit("W: %s input lost (%s); discarding up to the next line end",
+                     port == MC_PORT_PC ? "PC" : mc_plat_port_name(port),
+                     restarted ? "receive DMA restarted" : "main loop stalled, buffer overflowed");
+            }
         }
         if (n == 0u)
             break;
@@ -439,19 +489,27 @@ static void service_rx(unsigned port, uint32_t now)
         p->last_rx_ms = now;
         p->seen = 1;
         for (size_t i = 0; i < n; ++i) {
+            if (p->rx_pos == p->boundary)       /* first byte of a new line */
+                p->line_first_ms = now;
+            ++p->rx_pos;
             mc_line_event_t e = mc_line_feed(&p->line, buf[i]);
-            if (e == MC_LINE_READY) {
+            if (e == MC_LINE_BOUNDARY) {
+                p->boundary = p->rx_pos;
+            } else if (e == MC_LINE_READY) {
+                uint32_t start = p->boundary;   /* line began after this */
+                p->boundary = p->rx_pos;
                 ++p->c.rx_lines;
-                if (port == MC_PORT_PC && (tainted_chunk || p->taint_next)) {
-                    p->taint_next = 0;
+                if (port != MC_PORT_PC) {
+                    handle_dc_line(port, p->line.buf, p->line.len, now);
+                } else if (line_tainted(p, start, p->line_first_ms)) {
                     ++p->c.tainted;
                     note_drop(now);
-                    emit("E: line received with UART errors, not sent: %.*s",
-                         clip(p->line.len), p->line.buf);
-                } else if (port == MC_PORT_PC) {
-                    handle_pc_line(p->line.buf, p->line.len, now);
+                    if (ratelimit_hit(&rl_tainted, now))
+                        emit("E: line received with UART errors, not sent: %.*s",
+                             clip(p->line.len), p->line.buf);
                 } else {
-                    handle_dc_line(port, p->line.buf, p->line.len, now);
+                    p->taint_active = 0;        /* starts after the damage */
+                    handle_pc_line(p->line.buf, p->line.len, now);
                 }
             } else if (e == MC_LINE_OVERLONG) {
                 ++p->c.overlong;
@@ -465,8 +523,6 @@ static void service_rx(unsigned port, uint32_t now)
                          "MasterController, frame discarded");
             }
         }
-        if (tainted_chunk)
-            p->taint_next = 1;      /* the damage may lie in the next line */
     }
 }
 
@@ -520,6 +576,7 @@ static void service_health(uint32_t now)
     ratelimit_flush(&rl_busy, now, "E: busy, further lines not sent");
     ratelimit_flush(&rl_pc_binary, now, "E: binary frames discarded");
     ratelimit_flush(&rl_pc_overlong, now, "E: overlong lines discarded");
+    ratelimit_flush(&rl_tainted, now, "E: lines received with UART errors not sent");
 }
 
 /* ---------------------------------------------------------------- API */
@@ -539,6 +596,7 @@ void mc_app_init(void)
     memset(&rl_busy, 0, sizeof rl_busy);
     memset(&rl_pc_binary, 0, sizeof rl_pc_binary);
     memset(&rl_pc_overlong, 0, sizeof rl_pc_overlong);
+    memset(&rl_tainted, 0, sizeof rl_tainted);
     boot_ms = mc_plat_now_ms();
     last_activity_ms = boot_ms;
     status_requested = 0;
@@ -548,8 +606,9 @@ void mc_app_init(void)
         if (!mc_plat_port_present(i)) continue;
         mc_hw_stats_t hw;
         mc_plat_hw_stats(i, &hw);
-        ports[i].err_seen = ports[i].err_reported = err_total(&hw);
+        ports[i].err_seen = ports[i].err_reported = line_errors(&hw);
         ports[i].overrun_seen = hw.rx_overruns;
+        ports[i].restart_seen = hw.rx_restarts;
     }
 
     emit("MasterController %s ready (reset: %s). %u DataControllers, EVS2 @1..@%u. "

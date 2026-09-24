@@ -135,34 +135,105 @@ def main():
             print(f"  FAIL burst order for @{n}")
     busy = [m for m in mc if "busy" in m]
     if busy:
-        print(f"  note: {len(busy)} busy report(s) - increase pacing or reduce --burst")
+        ok = False
+        print(f"  FAIL {len(busy)} busy report(s): lines were refused (reduce --burst)")
 
-    print("stop: overtakes and purges queued lines")
-    for i in range(30):
-        link.send(f"@1 queued-{i}-" + "y" * 200)
-    link.send("@1 stop")
-    got, mc = link.collect(3.0)
-    stop_seen = "[DC-1] @1 stop" in got
-    purge = [m for m in mc if "discarded" in m]
-    ok &= stop_seen
-    print(f"  {'PASS' if stop_seen else 'FAIL'} stop delivered; "
-          f"{purge[0] if purge else 'no purge report (queue may have drained first)'}")
-
-    print("counters")
-    link.send("mc_status")
-    _, mc = link.collect(1.5)
-    for m in mc:
-        print("   ", m)
-    for m in mc:
-        if re.match(r"\[MC\] (PC|DC\d)", m):
-            bad = {k: int(v) for k, v in re.findall(r"\b(fe|ne|up_drop|stalls|dma_restarts)=(\d+)", m)
-                   if int(v)}
-            if bad:
-                ok = False
-                print(f"  FAIL nonzero error counters: {bad} in: {m[:40]}")
+    ok &= stop_test(link)
+    ok &= counters_test(link)
 
     print("\nRESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
+
+
+QUEUED = 30
+
+
+def stop_test(link):
+    """A stop must overtake the queue: every queued line either arrives
+    before the stop or is discarded (and reported), none arrives after it,
+    and the two together account for every line sent."""
+    print("stop: overtakes and purges queued lines")
+    for i in range(QUEUED):
+        link.send(f"@1 queued-{i}-" + "y" * 200)
+    link.send("@1 stop")
+    got, mc = link.collect(4.0)
+    ok = True
+    if "[DC-1] @1 stop" not in got:
+        print("  FAIL stop not delivered")
+        return False
+    at = got.index("[DC-1] @1 stop")
+    before = [g for g in got[:at] if " queued-" in g]
+    after = [g for g in got[at + 1:] if " queued-" in g]
+    purged = sum(int(m.group(1)) for line in mc
+                 if (m := re.search(r"discarded (\d+) queued line\(s\) for DC1", line)))
+    if after:
+        ok = False
+        print(f"  FAIL {len(after)} queued line(s) arrived after the stop, e.g. {after[0][:40]}")
+    if len(before) + purged != QUEUED:
+        ok = False
+        print(f"  FAIL {len(before)} delivered + {purged} discarded != {QUEUED} queued")
+    if ok:
+        print(f"  PASS stop delivered after {len(before)} line(s); {purged} discarded; none after it")
+    return ok
+
+
+# Every field each status row must carry, and the ones that must be zero.
+SUMMARY_ZERO = ("mc_lost", "busy")
+PC_FIELDS = ("rx", "lines", "tx", "overlong", "binary", "garbled",
+             "uart_err_lines", "fe", "ne", "overruns", "stalls")
+PC_ZERO = ("overlong", "binary", "garbled", "uart_err_lines", "fe", "ne",
+           "overruns", "stalls")
+DC_FIELDS = ("rx", "lines", "up_drop", "tx", "rejected", "purged", "overlong",
+             "binary", "fe", "ne", "overruns", "dma_restarts", "stalls")
+DC_ZERO = ("up_drop", "rejected", "overlong", "binary", "fe", "ne",
+           "overruns", "dma_restarts", "stalls")
+
+
+def fields(line):
+    return {k: int(v) for k, v in re.findall(r"\b([a-z_]+)=(\d+)\b", line)}
+
+
+def counters_test(link):
+    """Require the complete status report and fail on any loss or error."""
+    print("counters")
+    link.send("mc_status")
+    _, mc = link.collect(2.0)
+    rows = {}
+    for m in mc:
+        if m.startswith("[MC] status "):
+            rows["summary"] = m
+        elif (r := re.match(r"\[MC\] (PC|DC[1-6]) ", m)):
+            rows[r.group(1)] = m
+    for m in rows.values():
+        print("   ", m)
+
+    ok = True
+    expected = ["summary", "PC"] + [f"DC{k}" for k in range(1, NUM_DC + 1)]
+    missing = [r for r in expected if r not in rows]
+    if missing:
+        print(f"  FAIL status report incomplete, missing: {missing}")
+        return False
+
+    def check(row, need, zero, allow=()):
+        nonlocal ok
+        f = fields(rows[row])
+        absent = [k for k in need if k not in f]
+        if absent:
+            ok = False
+            print(f"  FAIL {row}: missing field(s) {absent}")
+        bad = {k: f[k] for k in zero if f.get(k, 0) and k not in allow}
+        if bad:
+            ok = False
+            print(f"  FAIL {row}: nonzero {bad}")
+
+    check("summary", SUMMARY_ZERO, SUMMARY_ZERO)
+    check("PC", PC_FIELDS, PC_ZERO)
+    for k in range(1, NUM_DC + 1):
+        # purged is expected on DC1 only, from the stop test.
+        check(f"DC{k}", DC_FIELDS, DC_ZERO + (() if k == 1 else ("purged",)))
+    if ok:
+        print("  PASS complete report, no loss or error counters")
+    return ok
 
 
 if __name__ == "__main__":

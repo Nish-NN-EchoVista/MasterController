@@ -313,8 +313,10 @@ static void test_pc_uart_errors_discard_affected_lines(void)
     /* The damaged chunk, the line straddling it, then the rest resumes. */
     CHECK_STR(fake_out(DC(1)), "@1 before\r\n@1 next\r\n@1 after\r\n");
     CHECK(strstr(fake_out(PC), "[MC] E: line received with UART errors, not sent: @1 damaged") != NULL);
-    CHECK(strstr(fake_out(PC), "[MC] E: line received with UART errors, not sent: @1 partial") != NULL);
     CHECK(strstr(fake_out(PC), "[MC] W: PC link: 1 UART error(s)") != NULL);
+    fake_inject(PC, "mc_status\r\n");
+    pump(20);
+    CHECK(strstr(fake_out(PC), "uart_err_lines=2 ") != NULL);   /* damaged + partial */
 
     /* A clean line after an error-free poll goes straight through. */
     fake_out_clear(DC(1));
@@ -355,8 +357,117 @@ static void test_rx_overrun_discards_partial_line(void)
     fake_inject(DC(2), "ne\r\n[ESV2-2] whole\r\n");
     pump(10);
     CHECK(strstr(fake_out(PC), "first half") == NULL);
+    CHECK(strstr(fake_out(PC), "[DC-2] ne\r\n") == NULL);   /* tail not a line */
     CHECK(strstr(fake_out(PC), "[ESV2-4] whole\r\n") != NULL);
-    CHECK(strstr(fake_out(PC), "receive buffer may have overflowed") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] W: DC2 input lost (main loop stalled") != NULL);
+}
+
+/* Review finding 1: the CRLF after an abort must precede queued stops. */
+static void test_abort_delimiter_precedes_queued_stops(void)
+{
+    boot();
+    fake_tx_mode(DC(1), FAKE_TX_STALL);
+    fake_inject(PC, "@1 first\r\n");
+    pump(3);
+    fake_inject(PC, "@1 stop\r\n@2 cancel\r\n@1 later\r\n");
+    pump(3);
+    fake_advance(200);
+    pump(1);                                    /* abort "first"           */
+    fake_tx_mode(DC(1), FAKE_TX_AUTO);
+    pump(10);
+    /* "@1 later" was sent after the stop, so it rightly follows it. */
+    CHECK_STR(fake_out(DC(1)), "\r\n@1 stop\r\n@2 cancel\r\n@1 later\r\n");
+}
+
+/* Review finding 2: an error behind buffered lines must still taint the
+   damaged line, however many lines and read chunks come first.           */
+static void test_error_behind_buffered_lines(void)
+{
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    boot();
+    for (int i = 0; i < 40; ++i) fake_inject(PC, "@1 clean\r\n");
+    fake_inject(PC, "@1 tart_sweep\r\n");       /* 's' lost to the error   */
+    hw.framing = 1;
+    fake_set_hw(PC, &hw);
+    pump(20);
+    CHECK(strstr(fake_out(DC(1)), "tart_sweep") == NULL);
+    CHECK(fake_out_len(DC(1)) == 0);            /* all 41 were buffered     */
+    /* A command typed later is not affected by the old error. */
+    fake_advance(MC_TAINT_GRACE_MS + 50u);
+    fake_inject(PC, "@1 after\r\nmc_status\r\n");
+    pump(60);
+    CHECK_STR(fake_out(DC(1)), "@1 after\r\n");
+    CHECK(strstr(fake_out(PC), "uart_err_lines=41 ") != NULL);
+}
+
+static void test_error_behind_service_budget(void)
+{
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    char line[40];
+    boot();
+    /* ~10 KB: more than two 4096-byte service passes, many 256-byte reads. */
+    for (int i = 0; i < 700; ++i) {
+        snprintf(line, sizeof line, "#1 clean %03d\r\n", i);
+        fake_inject(PC, line);
+    }
+    fake_inject(PC, "@1 damaged\r\n");
+    hw.noise = 1;
+    fake_set_hw(PC, &hw);
+    pump(40);
+    CHECK(strstr(fake_out(DC(1)), "damaged") == NULL);
+    CHECK(fake_out_len(DC(1)) == 0);            /* everything was buffered  */
+    fake_advance(MC_TAINT_GRACE_MS + 50u);
+    fake_inject(PC, "@1 fresh\r\n");
+    pump(5);
+    CHECK_STR(fake_out(DC(1)), "@1 fresh\r\n");
+}
+
+static void test_error_before_next_line_starts(void)
+{
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    boot();
+    fake_inject(PC, "@1 ok\r\n");
+    pump(3);
+    /* The error hits the first byte of a line nothing of which has been
+       received yet: "@1 get" arrives as "1 get".                         */
+    hw.framing = 1;
+    fake_set_hw(PC, &hw);
+    pump(1);
+    fake_inject(PC, "1 get\r\n@1 good\r\n");
+    pump(5);
+    CHECK_STR(fake_out(DC(1)), "@1 ok\r\n@1 good\r\n");
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        CHECK(strstr(fake_out(DC(k)), "1 get") == NULL);
+}
+
+/* Review finding 3: a DMA restart is a discontinuity on every port. */
+static void test_dma_restart_resyncs(void)
+{
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    boot();
+    fake_inject(PC, "@1 sta");
+    pump(2);
+    hw.rx_restarts = 1;
+    fake_set_hw(PC, &hw);
+    fake_inject(PC, "rt_sweep\r\n");
+    pump(5);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        CHECK(strstr(fake_out(DC(k)), "sweep") == NULL);
+    CHECK(strstr(fake_out(PC), "[MC] W: PC input lost (receive DMA restarted)") != NULL);
+    fake_inject(PC, "@1 next\r\n");
+    pump(5);
+    CHECK_STR(fake_out(DC(1)), "@1 next\r\n");
+
+    /* Downstream: partial telemetry is not joined across the restart. */
+    memset(&hw, 0, sizeof hw);
+    fake_inject(DC(3), "[ESV2-1] par");
+    pump(2);
+    hw.rx_restarts = 1;
+    fake_set_hw(DC(3), &hw);
+    fake_inject(DC(3), "tial\r\n[ESV2-2] whole\r\n");
+    pump(10);
+    CHECK(strstr(fake_out(PC), "tial") == NULL);
+    CHECK(strstr(fake_out(PC), "[ESV2-6] whole\r\n") != NULL);
 }
 
 static void test_dc_binary_frames_dropped(void)
@@ -533,6 +644,11 @@ int main(void)
     RUN(test_pc_uart_errors_discard_affected_lines);
     RUN(test_dc_uart_errors_warned_not_blocked);
     RUN(test_rx_overrun_discards_partial_line);
+    RUN(test_abort_delimiter_precedes_queued_stops);
+    RUN(test_error_behind_buffered_lines);
+    RUN(test_error_behind_service_budget);
+    RUN(test_error_before_next_line_starts);
+    RUN(test_dma_restart_resyncs);
     RUN(test_dc_binary_frames_dropped);
     RUN(test_health_events);
     RUN(test_status_and_local_commands);

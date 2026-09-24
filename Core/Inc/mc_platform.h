@@ -11,8 +11,11 @@
  *  - mc_plat_tx_start() begins sending exactly len bytes from data. The
  *    buffer must stay untouched until mc_plat_tx_busy() reports 0.
  *  - mc_plat_hw_stats() samples the line-error flags at the time of the
- *    call: every error affecting bytes already returned by mc_plat_rx_read()
- *    is included.
+ *    call. A call to mc_plat_rx_pending() made after it therefore counts
+ *    every byte received before any error it reported: the damage lies
+ *    within the bytes already read plus that pending count.
+ *  - rx_restarts and rx_overruns mark discontinuities: bytes may have been
+ *    lost at that point in the stream.
  */
 #ifndef MC_PLATFORM_H
 #define MC_PLATFORM_H
@@ -36,6 +39,8 @@ const char *mc_plat_port_name(unsigned port);     /* e.g. "USART10 PE3/PE2"   */
 uint32_t    mc_plat_port_baud(unsigned port);
 
 size_t      mc_plat_rx_read(unsigned port, uint8_t *dst, size_t max);
+/* Bytes received but not yet returned by mc_plat_rx_read(). */
+size_t      mc_plat_rx_pending(unsigned port);
 int         mc_plat_tx_busy(unsigned port);
 int         mc_plat_tx_start(unsigned port, const uint8_t *data, uint16_t len);
 void        mc_plat_tx_abort(unsigned port);

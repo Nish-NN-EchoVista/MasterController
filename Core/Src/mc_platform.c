@@ -175,6 +175,14 @@ size_t mc_plat_rx_read(unsigned port, uint8_t *dst, size_t max)
     return n;
 }
 
+size_t mc_plat_rx_pending(unsigned port)
+{
+    if (port >= MC_NUM_PORTS || !P[port].rx_buf) return 0;
+    const plat_port_t *p = &P[port];
+    uint16_t head = rx_head(p);
+    return (size_t)((head + p->rx_size - p->rx_tail) % p->rx_size);
+}
+
 /* Count and clear line-error flags. */
 static void poll_flags(plat_port_t *p)
 {

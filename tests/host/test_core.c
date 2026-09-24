@@ -109,6 +109,24 @@ static void test_txq_urgent_runs_keep_order_and_survive_purge(void)
     CHECK_STR(q_drain(), "r,U1,U2,s");
 }
 
+static void test_txq_push_front_precedes_urgent(void)
+{
+    q_reset();
+    q_push("n", 1, 0);
+    CHECK(q_push("U1", 1, 1));
+    CHECK(q_push("U2", 1, 1));
+    CHECK(mc_txq_push_front(&q, (const uint8_t *)"CR", 2, 0));
+    CHECK(mc_txq_purge(&q, 0xFF) == 1);            /* only "n"; CR immune  */
+    CHECK_STR(q_drain(), "CR,U1,U2");
+
+    q_reset();                                     /* behind a locked head */
+    q_push("w", 1, 0);
+    mc_txq_lock_head(&q);
+    q_push("U1", 1, 1);
+    CHECK(mc_txq_push_front(&q, (const uint8_t *)"CR", 2, 0));
+    CHECK_STR(q_drain(), "w,CR,U1");
+}
+
 static void test_txq_purge_by_mask(void)
 {
     q_reset();
@@ -224,6 +242,16 @@ static void test_line_unterminated_frame_resyncs(void)
     memcpy(s + n, "junk\nnext\n", 10); n += 10;
     CHECK_STR(feed(s, n, NULL, &bin), "next");
     CHECK(bin == 1);
+}
+
+static void test_line_resync(void)
+{
+    mc_line_init(&ln);
+    CHECK_STR(FEED("@1 sta"), "");
+    mc_line_resync(&ln);
+    CHECK_STR(FEED("rt_sweep\r\n@1 ok\r\n"), "@1 ok");
+    mc_line_resync(&ln);                           /* at a line boundary   */
+    CHECK_STR(FEED("\r\nnext\r\n"), "next");
 }
 
 /* --------------------------------------------------------------- router */
@@ -361,6 +389,8 @@ int main(void)
     RUN(test_line_overlong_dropped_whole);
     RUN(test_line_binary_frames_swallowed);
     RUN(test_line_unterminated_frame_resyncs);
+    RUN(test_line_resync);
+    RUN(test_txq_push_front_precedes_urgent);
     RUN(test_route_boards);
     RUN(test_route_invalid_addresses);
     RUN(test_route_dc_local_broadcast);

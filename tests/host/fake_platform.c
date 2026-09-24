@@ -90,6 +90,8 @@ size_t mc_plat_rx_read(unsigned port, uint8_t *dst, size_t max)
     return n;
 }
 
+size_t mc_plat_rx_pending(unsigned port) { return fp[port].rx_head - fp[port].rx_tail; }
+
 int mc_plat_tx_busy(unsigned port) { return fp[port].busy; }
 
 int mc_plat_tx_start(unsigned port, const uint8_t *data, uint16_t len)

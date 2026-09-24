@@ -104,11 +104,22 @@ Lines produced by the MasterController itself start with `[MC] `
 - **Damaged input is never forwarded.** If the laptop link reports a
   framing or noise error, the UART has dropped a byte. That byte might
   have been a line ending, which merges two commands, or a letter, which
-  could turn `stop` into something else. So the lines received around the
-  error are discarded with `[MC] E: line received with UART errors, not
-  sent: …`. This can occasionally discard a clean line, but a damaged one
-  is never forwarded. Errors on DataController links are counted and
-  warned about (at most once per second per port).
+  could turn `stop` into something else. The error flag doesn't say where
+  the byte was, so the MC plays it safe:
+  - It discards every line holding a byte received before the error was
+    seen, however much input was buffered at the time.
+  - It also discards a line that begins right at that point within 5 ms,
+    since the lost byte may have been its first character.
+  - A command typed afterwards is unaffected.
+  - Discards are reported as `[MC] E: line received with UART errors, not
+    sent: …` (rate-limited) and counted in `uart_err_lines=`.
+  - Errors on DataController links are counted and warned about, at most
+    once per second per port.
+- **Lost input is never glued together.** If a receive DMA restarts or a
+  ring overflows, input is lost at an unknown point. The partial line is
+  dropped, and everything up to the next line ending is discarded, so the
+  tail of a line can never be forwarded as a command. This applies on
+  every port.
 - **Nothing is lost silently.** Every drop is counted in `mc_status` and
   reported as an `[MC]` line. `[MC]` replies have their own reserved PC
   queue space, so they get through even when the PC link is congested.
@@ -255,8 +266,8 @@ It checks:
 - Every `@1`…`@12` and `#1`…`#6` route.
 - Broadcast lines arrive at all six DataControllers exactly once.
 - Back-to-back bursts to all 12 boards arrive whole and in order.
-- A stop overtakes and discards queued lines.
-- Framing, noise, drop and stall counters all stay at zero.
+- A stop overtakes and discards queued lines: every queued line arrives before it or is reported discarded, and none arrives after it.
+- The full status report (summary plus all seven ports) is present, and every loss and error counter is zero.
 
 The same script runs against the **host simulator**, which is the real
 routing core with emulated wire speeds and looped-back DC ports:

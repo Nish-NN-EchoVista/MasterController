@@ -21,7 +21,10 @@ typedef enum {
     MC_LINE_NONE = 0,
     MC_LINE_READY,        /* buf/len hold a complete line until the next feed */
     MC_LINE_OVERLONG,     /* a line exceeded MC_LINE_MAX and is being dropped */
-    MC_LINE_BINARY        /* a binary frame (or frame-like noise) was dropped */
+    MC_LINE_BINARY,       /* a binary frame (or frame-like noise) was dropped */
+    MC_LINE_BOUNDARY      /* a terminator that produced no line (an empty line,
+                             or the end of a discarded line): the next byte
+                             starts a new line                                */
 } mc_line_event_t;
 
 typedef struct {
@@ -34,5 +37,9 @@ typedef struct {
 
 void            mc_line_init(mc_line_t *l);
 mc_line_event_t mc_line_feed(mc_line_t *l, uint8_t byte);
+/* Input was lost (DMA restart, ring overrun): drop any partial line and
+   discard everything up to and including the next terminator, so the
+   tail of a line whose start was lost is never taken as a new line.       */
+void            mc_line_resync(mc_line_t *l);
 
 #endif /* MC_LINE_H */

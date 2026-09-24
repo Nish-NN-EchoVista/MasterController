@@ -27,21 +27,42 @@ static uint16_t ring_at(const mc_txq_t *q, uint16_t pos)
     return (uint16_t)((q->head + pos) % q->cap);
 }
 
-int mc_txq_push(mc_txq_t *q, const uint8_t *data, uint16_t len,
-                uint8_t tag, int urgent)
+/* Take a free slot and fill it. Returns the slot index, or -1. */
+static int take_slot(mc_txq_t *q, const uint8_t *data, uint16_t len,
+                     uint8_t tag, uint8_t urgent)
 {
     if (!q->free_count || len == 0u || len > MC_SLOT_BYTES)
-        return 0;
-
+        return -1;
     uint16_t s = q->free_stack[--q->free_count];
     mc_slot_t *slot = &q->slots[s];
     memcpy(slot->data, data, len);
     slot->len = len;
     slot->tag = tag;
-    slot->urgent = (uint8_t)(urgent != 0);
+    slot->urgent = urgent;
+    return (int)s;
+}
+
+/* Insert slot s so that it becomes entry number pos (0 = head). Opens the
+   gap by moving the head back one place and shifting the first pos entries
+   down into the space that frees.                                         */
+static void insert_at(mc_txq_t *q, uint16_t s, uint16_t pos)
+{
+    q->head = (uint16_t)((q->head + q->cap - 1u) % q->cap);
+    for (uint16_t i = 0; i < pos; ++i)
+        q->order[ring_at(q, i)] = q->order[ring_at(q, (uint16_t)(i + 1u))];
+    q->order[ring_at(q, pos)] = s;
+    ++q->count;
+}
+
+int mc_txq_push(mc_txq_t *q, const uint8_t *data, uint16_t len,
+                uint8_t tag, int urgent)
+{
+    int s = take_slot(q, data, len, tag, (uint8_t)(urgent != 0));
+    if (s < 0)
+        return 0;
 
     if (!urgent) {
-        q->order[ring_at(q, q->count)] = s;
+        q->order[ring_at(q, q->count)] = (uint16_t)s;
         ++q->count;
         return 1;
     }
@@ -50,14 +71,16 @@ int mc_txq_push(mc_txq_t *q, const uint8_t *data, uint16_t len,
     uint16_t pos = q->head_locked ? 1u : 0u;
     while (pos < q->count && q->slots[q->order[ring_at(q, pos)]].urgent)
         ++pos;
+    insert_at(q, (uint16_t)s, pos);
+    return 1;
+}
 
-    /* Open a gap at pos by moving the head back one place and shifting the
-       first pos entries down into the space that frees.                    */
-    q->head = (uint16_t)((q->head + q->cap - 1u) % q->cap);
-    for (uint16_t i = 0; i < pos; ++i)
-        q->order[ring_at(q, i)] = q->order[ring_at(q, (uint16_t)(i + 1u))];
-    q->order[ring_at(q, pos)] = s;
-    ++q->count;
+int mc_txq_push_front(mc_txq_t *q, const uint8_t *data, uint16_t len, uint8_t tag)
+{
+    int s = take_slot(q, data, len, tag, 1u);
+    if (s < 0)
+        return 0;
+    insert_at(q, (uint16_t)s, q->head_locked ? 1u : 0u);
     return 1;
 }
 

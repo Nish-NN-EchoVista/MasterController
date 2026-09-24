@@ -53,6 +53,13 @@ uint16_t mc_txq_free(const mc_txq_t *q);
 int      mc_txq_push(mc_txq_t *q, const uint8_t *data, uint16_t len,
                      uint8_t tag, int urgent);
 
+/* Insert as the very next entry to send: after a locked head, ahead of
+   everything else including queued urgent entries. The entry is urgent
+   (never purged). Used for the CRLF that terminates an aborted line, which
+   must precede whatever is sent next. Returns 1 on success.               */
+int      mc_txq_push_front(mc_txq_t *q, const uint8_t *data, uint16_t len,
+                           uint8_t tag);
+
 /* Head entry, or NULL if empty. */
 const mc_slot_t *mc_txq_head(const mc_txq_t *q);
 /* Mark the head as in transmission. No-op if empty. */

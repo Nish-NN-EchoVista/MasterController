@@ -55,6 +55,11 @@
 #define MC_STARTUP_GRACE_MS    3000u
 /* Rate limit for repeated warnings (drops, binary frames, busy).            */
 #define MC_WARN_INTERVAL_MS    1000u
+/* After a PC-link UART error, a line whose first byte arrives within this
+   time of the error is also discarded: the lost byte may have been its
+   first character. A line starting later cannot contain the lost byte,
+   because the laptop sends each line as one burst.                         */
+#define MC_TAINT_GRACE_MS      5u
 /* A transmit that has not completed after its wire time plus this margin is
    aborted and counted as a stall.                                            */
 #define MC_TX_STALL_MARGIN_MS  100u

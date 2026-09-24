@@ -14,6 +14,15 @@ void mc_line_init(mc_line_t *l)
     l->buf[0] = '\0';
 }
 
+void mc_line_resync(mc_line_t *l)
+{
+    l->len = 0;
+    l->bin_len = 0;
+    l->ready = 0;
+    l->state = ST_DISCARD;
+    l->buf[0] = '\0';
+}
+
 static mc_line_event_t open_frame(mc_line_t *l)
 {
     l->len = 0;
@@ -45,8 +54,10 @@ mc_line_event_t mc_line_feed(mc_line_t *l, uint8_t b)
     case ST_DISCARD:
         if (b == 0u)
             return open_frame(l);
-        if (b == '\r' || b == '\n')
+        if (b == '\r' || b == '\n') {
             l->state = ST_TEXT;
+            return MC_LINE_BOUNDARY;
+        }
         return MC_LINE_NONE;
 
     default: /* ST_TEXT */
@@ -54,7 +65,7 @@ mc_line_event_t mc_line_feed(mc_line_t *l, uint8_t b)
             return open_frame(l);
         if (b == '\r' || b == '\n') {
             if (l->len == 0u)
-                return MC_LINE_NONE;
+                return MC_LINE_BOUNDARY;
             l->buf[l->len] = '\0';
             l->ready = 1;
             return MC_LINE_READY;
