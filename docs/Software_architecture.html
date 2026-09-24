@@ -1,0 +1,1039 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MasterController Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0D121C;
+    --bg-deep: #0A0E16;
+    --surface: #141C2A;
+    --raised: #1A2436;
+    --raised-2: #202C42;
+    --line: #27344A;
+    --line-2: #34445F;
+    --text: #DCE3EE;
+    --text-soft: #B7C2D3;
+    --muted: #8B97AD;
+    --faint: #5E6B82;
+    --accent: #5B9BFF;
+    --accent-soft: #9CC2FF;
+    --accent-dim: #1B3358;
+    --cyan: #46C2CB;
+    --cyan-dim: #143A44;
+    --ok: #4CC38A;
+    --ok-dim: #143826;
+    --warn: #E3B341;
+    --warn-dim: #3A2E12;
+    --crit: #EF6B73;
+    --crit-dim: #3C181D;
+    --display: "Barlow Semi Condensed", "Arial Narrow", "Segoe UI", system-ui, sans-serif;
+    --sans: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.65 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-soft); text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent); text-underline-offset: 3px; }
+  a:hover { color: #fff; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+  /* ---------- frame ---------- */
+  .shell {
+    display: grid;
+    grid-template-columns: 232px minmax(0, 1fr);
+    gap: 48px;
+    max-width: 1260px;
+    margin: 0 auto;
+    padding-inline: 28px;
+    padding-block: 0 80px;
+  }
+  .rail {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
+    padding-block: 36px 24px;
+  }
+  .rail-title {
+    font: 600 12px/1 var(--mono);
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin: 0 0 14px;
+  }
+  .rail ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+  .rail a {
+    display: block;
+    padding: 6px 10px;
+    border-radius: 6px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13.5px;
+    line-height: 1.35;
+    border-left: 2px solid transparent;
+  }
+  .rail a:hover { background: var(--surface); color: var(--text); }
+  .rail a .n { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-right: 8px; }
+
+  main { min-width: 0; padding-block: 36px 0; }
+
+  /* ---------- hero ---------- */
+  .hero {
+    position: relative;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 34px 34px 28px;
+    background:
+      radial-gradient(120% 140% at 100% 0%, #16294A 0%, transparent 55%),
+      linear-gradient(180deg, #121A29, var(--surface));
+    overflow: hidden;
+  }
+  .hero::after {
+    /* faint board grid */
+    content: "";
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 28px 28px;
+    opacity: .18;
+    mask-image: linear-gradient(90deg, transparent 30%, #000 100%);
+    pointer-events: none;
+  }
+  .eyebrow {
+    font: 500 12px/1.2 var(--mono);
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    margin: 0 0 12px;
+  }
+  h1 {
+    font: 700 clamp(34px, 5.4vw, 54px)/1.02 var(--display);
+    letter-spacing: -.01em;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  h1 .thin { font-weight: 500; color: var(--muted); }
+  .lede { max-width: 66ch; color: var(--text-soft); font-size: 16.5px; margin: 0; position: relative; z-index: 1; }
+  .spec {
+    position: relative; z-index: 1;
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin: 22px 0 0; padding: 0; list-style: none;
+  }
+  .spec li {
+    font: 500 12.5px/1 var(--mono);
+    color: var(--text-soft);
+    background: rgba(13, 18, 28, .72);
+    border: 1px solid var(--line-2);
+    border-radius: 999px;
+    padding: 7px 12px;
+  }
+  .spec li b { color: var(--accent-soft); font-weight: 500; }
+
+  /* ---------- sections ---------- */
+  section { padding-block: 56px 0; scroll-margin-top: 16px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+  .sec-no { font: 500 13px/1 var(--mono); color: var(--accent); }
+  h2 {
+    font: 600 clamp(26px, 3.2vw, 32px)/1.1 var(--display);
+    margin: 0;
+    text-wrap: balance;
+  }
+  h3 {
+    font: 600 19px/1.25 var(--display);
+    letter-spacing: .01em;
+    margin: 30px 0 8px;
+    color: var(--text);
+  }
+  p { margin: 0 0 14px; max-width: 72ch; }
+  .sec-intro { color: var(--text-soft); max-width: 70ch; margin: 10px 0 20px; }
+  ul.plain { margin: 0 0 16px; padding-left: 20px; max-width: 72ch; }
+  ul.plain li { margin: 5px 0; }
+  ul.plain li::marker { color: var(--accent); }
+  code, .mono { font-family: var(--mono); font-size: .86em; }
+  code {
+    background: var(--raised);
+    border: 1px solid var(--line);
+    color: #C3D5F5;
+    padding: 1px 6px;
+    border-radius: 5px;
+    white-space: nowrap;
+  }
+  strong { color: #EEF3FA; font-weight: 600; }
+
+  /* ---------- figures ---------- */
+  figure { margin: 18px 0 22px; }
+  .diagram {
+    background: linear-gradient(180deg, var(--surface), #111827);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px;
+    overflow-x: auto;
+  }
+  .diagram svg { display: block; width: 100%; height: auto; }
+  .w-760 svg { min-width: 760px; }
+  .w-900 svg { min-width: 900px; }
+  .w-1100 svg { min-width: 1060px; }
+  figcaption { color: var(--muted); font-size: 13.5px; margin-top: 10px; max-width: 80ch; }
+  figcaption b { color: var(--text-soft); font-weight: 600; }
+
+  /* SVG vocabulary */
+  .b  { fill: var(--raised); stroke: var(--line-2); stroke-width: 1.2; }
+  .b2 { fill: var(--raised-2); stroke: var(--line-2); stroke-width: 1.2; }
+  .ba { fill: #15294A; stroke: var(--accent); stroke-width: 1.6; }
+  .bc { fill: var(--cyan-dim); stroke: var(--cyan); stroke-width: 1.3; }
+  .bok { fill: var(--ok-dim); stroke: var(--ok); stroke-width: 1.3; }
+  .bw { fill: var(--warn-dim); stroke: var(--warn); stroke-width: 1.3; }
+  .bx { fill: var(--crit-dim); stroke: var(--crit); stroke-width: 1.3; }
+  .ln  { stroke: var(--line-2); stroke-width: 1.6; fill: none; }
+  .la  { stroke: var(--accent); stroke-width: 1.8; fill: none; }
+  .lc  { stroke: var(--cyan); stroke-width: 1.8; fill: none; }
+  .lx  { stroke: var(--crit); stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+  .lw  { stroke: var(--warn); stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+  .t   { fill: var(--text); font: 600 13.5px var(--sans); }
+  .t2  { fill: var(--text-soft); font: 12px var(--sans); }
+  .tm  { fill: var(--muted); font: 11.5px var(--mono); }
+  .ta  { fill: var(--accent-soft); font: 500 11.5px var(--mono); }
+  .tc  { fill: var(--cyan); font: 500 11.5px var(--mono); }
+  .tx  { fill: var(--crit); font: 500 11.5px var(--mono); }
+  .tw  { fill: var(--warn); font: 500 11.5px var(--mono); }
+  .tok { fill: var(--ok); font: 500 11.5px var(--mono); }
+  .th  { fill: var(--text); font: 600 15px var(--display); letter-spacing: .02em; }
+
+  /* ---------- tables ---------- */
+  .tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; margin: 16px 0 22px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font: 600 11.5px/1.3 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); background: var(--raised); white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td.num, .tab { font-variant-numeric: tabular-nums; }
+  td code { white-space: nowrap; }
+
+  /* ---------- layer stack ---------- */
+  .stack { display: grid; gap: 10px; margin: 18px 0 8px; }
+  .layer {
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .layer.hl { border-color: var(--accent); background: linear-gradient(90deg, #13233F, var(--surface) 60%); }
+  .layer.core { border-color: var(--cyan); background: linear-gradient(90deg, #11303A, var(--surface) 60%); }
+  .layer h4 { font: 600 16px/1.2 var(--display); margin: 0 0 3px; }
+  .layer .where { font: 11.5px/1.4 var(--mono); color: var(--muted); }
+  .layer p { margin: 0; color: var(--text-soft); font-size: 14px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { font: 500 11.5px/1 var(--mono); padding: 5px 8px; border-radius: 6px; background: var(--raised); border: 1px solid var(--line-2); color: var(--text-soft); }
+  .stack-note { color: var(--muted); font-size: 13.5px; margin: 0 0 12px; }
+
+  /* ---------- two-lane loop ---------- */
+  .lanes { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 14px; margin: 18px 0 8px; }
+  .lane { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .lane.isr { border-style: dashed; border-color: var(--line-2); }
+  .lane h4 { font: 600 16px/1.2 var(--display); margin: 0 0 4px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .lane h4 span { font: 500 11.5px var(--mono); color: var(--muted); }
+  .lane ol { margin: 10px 0 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 8px; }
+  .lane ol li { counter-increment: s; display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; font-size: 14px; color: var(--text-soft); }
+  .lane ol li::before {
+    content: counter(s);
+    font: 500 11.5px/22px var(--mono); text-align: center;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--accent-dim); color: var(--accent-soft);
+  }
+  .lane ul { margin: 10px 0 0; padding-left: 18px; font-size: 14px; color: var(--text-soft); }
+  .lane ul li { margin: 6px 0; }
+  .lane ul li::marker { color: var(--cyan); }
+
+  /* ---------- queue illustration ---------- */
+  .q {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch;
+    background: var(--bg-deep); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
+    margin: 16px 0 8px;
+  }
+  .slot {
+    font: 500 12.5px/1.3 var(--mono);
+    padding: 9px 11px 8px;
+    border-radius: 8px;
+    border: 1px solid var(--line-2);
+    background: var(--raised);
+    color: var(--text-soft);
+    min-width: 0;
+  }
+  .slot small { display: block; font: 10.5px/1.3 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-bottom: 3px; }
+  .slot.lock { border-color: var(--accent); background: #15294A; color: #DCE8FF; }
+  .slot.front { border-color: var(--warn); background: var(--warn-dim); color: #F6DE9E; }
+  .slot.urg { border-color: var(--crit); background: var(--crit-dim); color: #FFC9CC; }
+  .slot.ord { opacity: .9; }
+  .slot.gone { text-decoration: line-through; opacity: .45; border-style: dashed; }
+  .q-arrow { align-self: center; color: var(--faint); font: 13px var(--mono); }
+
+  /* ---------- callouts & cards ---------- */
+  .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h4 { font: 600 16px/1.25 var(--display); margin: 0 0 6px; }
+  .card p { font-size: 14px; color: var(--text-soft); margin: 0; }
+  .card .k { font: 500 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--faint); display: block; margin-bottom: 8px; }
+  .note {
+    border: 1px solid var(--line-2);
+    border-left: 3px solid var(--warn);
+    background: linear-gradient(90deg, #2A2412, var(--surface) 40%);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 14px;
+    color: var(--text-soft);
+    margin: 16px 0;
+    max-width: 82ch;
+  }
+  .note b { color: #F6DE9E; }
+  .pill { display: inline-block; font: 500 11px/1 var(--mono); padding: 4px 7px; border-radius: 5px; border: 1px solid; vertical-align: 1px; }
+  .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); background: var(--ok-dim); }
+  .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); background: var(--warn-dim); }
+  .pill.crit { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 50%, transparent); background: var(--crit-dim); }
+  .pill.info { color: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 50%, transparent); background: var(--accent-dim); }
+
+  pre.term {
+    background: var(--bg-deep);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font: 12.5px/1.6 var(--mono);
+    color: var(--text-soft);
+    margin: 14px 0 20px;
+  }
+  pre.term .p { color: var(--faint); }
+  pre.term .a { color: var(--accent-soft); }
+  pre.term .c { color: var(--cyan); }
+  pre.term .w { color: var(--warn); }
+  pre.term .x { color: var(--crit); }
+
+  footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--faint); font-size: 13px; }
+
+  /* ---------- responsive ---------- */
+  @media (max-width: 980px) {
+    .shell { grid-template-columns: minmax(0, 1fr); gap: 0; padding-inline: 18px; }
+    .rail { position: static; max-height: none; padding-block: 20px 0; }
+    .rail ol { display: flex; flex-wrap: wrap; gap: 6px; }
+    .rail a { border: 1px solid var(--line); padding: 5px 9px; font-size: 12.5px; }
+    .lanes { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 720px) {
+    .shell { padding-inline: 16px; }
+    .hero { padding: 24px 20px 20px; }
+    .layer { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+    .grid2, .grid3 { grid-template-columns: minmax(0, 1fr); }
+    section { padding-block: 44px 0; }
+  }
+</style>
+
+<div class="shell">
+  <nav class="rail" aria-label="Contents">
+    <p class="rail-title">Contents</p>
+    <ol>
+      <li><a href="#overview"><span class="n">01</span>System overview</a></li>
+      <li><a href="#hardware"><span class="n">02</span>Hardware &amp; pins</a></li>
+      <li><a href="#layers"><span class="n">03</span>Software layers</a></li>
+      <li><a href="#loop"><span class="n">04</span>Execution model</a></li>
+      <li><a href="#downstream"><span class="n">05</span>Laptop → boards</a></li>
+      <li><a href="#upstream"><span class="n">06</span>Boards → laptop</a></li>
+      <li><a href="#rules"><span class="n">07</span>Addressing &amp; tags</a></li>
+      <li><a href="#queues"><span class="n">08</span>Whole-line queues</a></li>
+      <li><a href="#states"><span class="n">09</span>State machines</a></li>
+      <li><a href="#integrity"><span class="n">10</span>Integrity &amp; recovery</a></li>
+      <li><a href="#observe"><span class="n">11</span>Observability</a></li>
+      <li><a href="#verify"><span class="n">12</span>Verification</a></li>
+      <li><a href="#config"><span class="n">13</span>Configuration</a></li>
+      <li><a href="#files"><span class="n">14</span>File map</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <p class="eyebrow">Echovista · firmware architecture · NUCLEO-H7A3ZI-Q</p>
+      <h1>MasterController <span class="thin">software architecture</span></h1>
+      <p class="lede">One laptop UART in, six DataController UARTs out, twelve EVS2 boards behind them. The MasterController is a pass-through line router. It forwards commands down, merges and renumbers telemetry coming back up, and never joins, splits or silently drops a line.</p>
+      <ul class="spec" aria-label="Key facts">
+        <li><b>STM32H7A3</b> · 280 MHz</li>
+        <li><b>7</b> routed UARTs + ST-LINK VCP</li>
+        <li><b>921 600</b> baud up · <b>57 600</b> baud down</li>
+        <li><b>@1…@12</b> EVS2 addressing</li>
+        <li><b>346</b> host test checks</li>
+        <li>v<b>1.0.0</b> · main</li>
+      </ul>
+    </header>
+
+    <!-- ===================================================== 01 -->
+    <section id="overview">
+      <div class="sec-head"><span class="sec-no">01</span><h2>System overview</h2></div>
+      <p class="sec-intro">The F401 DataController already routes <code>@1</code>/<code>@2</code> commands to its two EVS2 boards and tags their replies <code>[ESV2-1]</code>/<code>[ESV2-2]</code>. The MasterController repeats that pattern one level up, for six DataControllers. The DataController firmware is unchanged: each one sees exactly the text a laptop would send it today.</p>
+
+      <figure>
+        <div class="diagram w-900">
+          <svg viewBox="0 0 980 352" role="img" aria-labelledby="topo-t">
+            <title id="topo-t">Topology: laptop to MasterController to six DataControllers, each with two EVS2 boards</title>
+            <defs>
+              <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5B9BFF"/></marker>
+              <marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#46C2CB"/></marker>
+            </defs>
+            <!-- laptop -->
+            <rect class="b2" x="16" y="146" width="150" height="72" rx="9"/>
+            <text class="t" x="91" y="176" text-anchor="middle">Laptop · PyGUI</text>
+            <text class="t2" x="91" y="196" text-anchor="middle">USB-UART adapter</text>
+            <line class="la" x1="166" y1="182" x2="278" y2="182" marker-start="url(#ah)" marker-end="url(#ah)"/>
+            <text class="ta" x="222" y="170" text-anchor="middle">USART2</text>
+            <text class="tm" x="222" y="202" text-anchor="middle">921 600 8N1</text>
+            <!-- MC -->
+            <rect class="ba" x="280" y="104" width="214" height="156" rx="11"/>
+            <text class="th" x="387" y="142" text-anchor="middle">MasterController</text>
+            <text class="t2" x="387" y="163" text-anchor="middle">NUCLEO-H7A3ZI-Q</text>
+            <text class="tm" x="387" y="190" text-anchor="middle">STM32H7A3 · 280 MHz</text>
+            <text class="tm" x="387" y="210" text-anchor="middle">DMA RX · IT TX · IWDG</text>
+            <text class="ta" x="387" y="240" text-anchor="middle">mc_app · mc_router</text>
+            <!-- bus -->
+            <line class="lc" x1="494" y1="182" x2="532" y2="182"/>
+            <line class="lc" x1="532" y1="38" x2="532" y2="318"/>
+            <!-- DC rows -->
+            <g>
+              <line class="lc" x1="532" y1="38"  x2="618" y2="38"  marker-end="url(#ahc)"/><text class="tc" x="575" y="31"  text-anchor="middle">USART10</text>
+              <line class="lc" x1="532" y1="94"  x2="618" y2="94"  marker-end="url(#ahc)"/><text class="tc" x="575" y="87"  text-anchor="middle">UART7</text>
+              <line class="lc" x1="532" y1="150" x2="618" y2="150" marker-end="url(#ahc)"/><text class="tc" x="575" y="143" text-anchor="middle">UART4</text>
+              <line class="lc" x1="532" y1="206" x2="618" y2="206" marker-end="url(#ahc)"/><text class="tc" x="575" y="199" text-anchor="middle">UART5</text>
+              <line class="lc" x1="532" y1="262" x2="618" y2="262" marker-end="url(#ahc)"/><text class="tc" x="575" y="255" text-anchor="middle">UART9</text>
+              <line class="lc" x1="532" y1="318" x2="618" y2="318" marker-end="url(#ahc)"/><text class="tc" x="575" y="311" text-anchor="middle">USART6</text>
+            </g>
+            <g>
+              <rect class="b" x="620" y="18"  width="150" height="40" rx="7"/><text class="t" x="695" y="36"  text-anchor="middle">DC1 · F401</text><text class="tm" x="695" y="51"  text-anchor="middle">57 600 baud</text>
+              <rect class="b" x="620" y="74"  width="150" height="40" rx="7"/><text class="t" x="695" y="92"  text-anchor="middle">DC2 · F401</text><text class="tm" x="695" y="107" text-anchor="middle">57 600 baud</text>
+              <rect class="b" x="620" y="130" width="150" height="40" rx="7"/><text class="t" x="695" y="148" text-anchor="middle">DC3 · F401</text><text class="tm" x="695" y="163" text-anchor="middle">57 600 baud</text>
+              <rect class="b" x="620" y="186" width="150" height="40" rx="7"/><text class="t" x="695" y="204" text-anchor="middle">DC4 · F401</text><text class="tm" x="695" y="219" text-anchor="middle">57 600 baud</text>
+              <rect class="b" x="620" y="242" width="150" height="40" rx="7"/><text class="t" x="695" y="260" text-anchor="middle">DC5 · F401</text><text class="tm" x="695" y="275" text-anchor="middle">57 600 baud</text>
+              <rect class="b" x="620" y="298" width="150" height="40" rx="7"/><text class="t" x="695" y="316" text-anchor="middle">DC6 · F401</text><text class="tm" x="695" y="331" text-anchor="middle">57 600 baud</text>
+            </g>
+            <g>
+              <line class="ln" x1="770" y1="38"  x2="818" y2="38"/>
+              <line class="ln" x1="770" y1="94"  x2="818" y2="94"/>
+              <line class="ln" x1="770" y1="150" x2="818" y2="150"/>
+              <line class="ln" x1="770" y1="206" x2="818" y2="206"/>
+              <line class="ln" x1="770" y1="262" x2="818" y2="262"/>
+              <line class="ln" x1="770" y1="318" x2="818" y2="318"/>
+              <rect class="b2" x="820" y="18"  width="144" height="40" rx="7"/><text class="t2" x="892" y="43"  text-anchor="middle">EVS2 @1 · @2</text>
+              <rect class="b2" x="820" y="74"  width="144" height="40" rx="7"/><text class="t2" x="892" y="99"  text-anchor="middle">EVS2 @3 · @4</text>
+              <rect class="b2" x="820" y="130" width="144" height="40" rx="7"/><text class="t2" x="892" y="155" text-anchor="middle">EVS2 @5 · @6</text>
+              <rect class="b2" x="820" y="186" width="144" height="40" rx="7"/><text class="t2" x="892" y="211" text-anchor="middle">EVS2 @7 · @8</text>
+              <rect class="b2" x="820" y="242" width="144" height="40" rx="7"/><text class="t2" x="892" y="267" text-anchor="middle">EVS2 @9 · @10</text>
+              <rect class="b2" x="820" y="298" width="144" height="40" rx="7"/><text class="t2" x="892" y="323" text-anchor="middle">EVS2 @11 · @12</text>
+            </g>
+          </svg>
+        </div>
+        <figcaption><b>Topology.</b> Blue: the laptop link. Cyan: the six DataController links, each running existing, unmodified F401 firmware with two EVS2 boards behind it.</figcaption>
+      </figure>
+
+      <div class="grid3">
+        <div class="card"><span class="k">Does</span><h4>Routes whole lines</h4><p>Sends <code>@n</code> commands to one board, <code>#k</code> commands to one DataController, and plain commands to all six. It also merges and renumbers the replies.</p></div>
+        <div class="card"><span class="k">Guarantees</span><h4>Atomic behavior</h4><p>No line is ever split or merged. A broadcast reaches all six DataControllers or none. A stop overtakes queued traffic.</p></div>
+        <div class="card"><span class="k">Does not</span><h4>Own any process logic</h4><p>No pump, defog or sequence behavior. Binary protocol frames are dropped in v1 and never forwarded.</p></div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 02 -->
+    <section id="hardware">
+      <div class="sec-head"><span class="sec-no">02</span><h2>Hardware &amp; pin map</h2></div>
+      <p class="sec-intro">Every pin was checked against CubeMX's database for the STM32H7A3ZITxQ (LQFP144) and against the Nucleo board's own wiring. The ST-LINK serial pins, the USB OTG pins, the LEDs, the button, the SWD pins and the oscillator pins are all left alone.</p>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Port</th><th>Link</th><th>UART</th><th>TX</th><th>RX</th><th>Baud</th><th>RX ring</th></tr></thead>
+          <tbody>
+            <tr><td class="num"><code>0</code></td><td>Laptop (external USB-UART)</td><td>USART2</td><td><code>PA2</code></td><td><code>PA3</code></td><td class="num">921 600</td><td class="num">48 KB · ≈533 ms</td></tr>
+            <tr><td class="num"><code>1</code></td><td>DC1 → EVS2 @1, @2</td><td>USART10</td><td><code>PE3</code></td><td><code>PE2</code></td><td class="num">57 600</td><td class="num">8 KB · ≈1.4 s</td></tr>
+            <tr><td class="num"><code>2</code></td><td>DC2 → EVS2 @3, @4</td><td>UART7</td><td><code>PF7</code></td><td><code>PF6</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>3</code></td><td>DC3 → EVS2 @5, @6</td><td>UART4</td><td><code>PA0</code></td><td><code>PA1</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>4</code></td><td>DC4 → EVS2 @7, @8</td><td>UART5</td><td><code>PB13</code></td><td><code>PB12</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>5</code></td><td>DC5 → EVS2 @9, @10</td><td>UART9</td><td><code>PD15</code></td><td><code>PD14</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>6</code></td><td>DC6 → EVS2 @11, @12</td><td>USART6</td><td><code>PC6</code></td><td><code>PC7</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>7</code></td><td>Diagnostics mirror (TX only)</td><td>USART3</td><td><code>PD8</code></td><td><code>PD9</code></td><td class="num">115 200</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul class="plain">
+        <li><strong>Clocks:</strong> 280 MHz system clock from the HSI via PLL1, with the UART kernel clocks on PCLK at 140 MHz. That gives about 0.07% error at 921 600 and 0.02% at 57 600.</li>
+        <li><strong>Power:</strong> the direct SMPS supply configuration that this "-Q" board requires.</li>
+        <li><strong>RX pins:</strong> internal pull-ups on every RX pin, so an unplugged DataController reads as an idle line rather than noise.</li>
+        <li><strong>Cache:</strong> only the instruction cache is enabled. Leaving the data cache off means the DMA ring buffers (in AXI SRAM at <code>0x24000000</code>) never need cache maintenance.</li>
+      </ul>
+    </section>
+
+    <!-- ===================================================== 03 -->
+    <section id="layers">
+      <div class="sec-head"><span class="sec-no">03</span><h2>Software layers</h2></div>
+      <p class="sec-intro">The code is split so that everything that decides <em>what</em> happens to a line has no hardware dependency. It is plain C that compiles and runs on a PC against a fake platform. Only one file knows about DMA streams, UART registers and the watchdog.</p>
+      <p class="stack-note">Listed top to bottom from the hardware inward. Each layer only calls the one beneath it.</p>
+      <div class="stack">
+        <div class="layer">
+          <div><h4>CubeMX-generated</h4><div class="where">main.c · stm32h7xx_it.c · hal_msp.c</div></div>
+          <div><p>Clock, power, GPIO, UART and DMA initialisation, generated from <code>MasterController.ioc</code>. The only hand edits sit inside <code>USER CODE</code> blocks, so regenerating is safe:</p>
+          <ul class="plain">
+            <li><code>mc_board_init()</code> before the loop and <code>mc_board_poll()</code> inside it;</li>
+            <li><code>mc_board_fatal()</code> in <code>Error_Handler</code> and the fault vectors.</li>
+          </ul>
+          <div class="chips"><span class="chip">HAL 1.11.6</span><span class="chip">CMSIS</span><span class="chip">Nucleo BSP</span></div></div>
+        </div>
+        <div class="layer hl">
+          <div><h4>Board layer</h4><div class="where">mc_platform.c · mc_board.h</div></div>
+          <div><p>Starts each circular RX DMA stream directly, sends with interrupts and the UART FIFO, and counts line-error flags. It also restarts a stalled DMA stream, detects main-loop stalls, and handles the reset cause, the fault record, the LEDs and the watchdog.</p>
+          <div class="chips"><span class="chip">DMA RX</span><span class="chip">IT TX</span><span class="chip">IWDG</span><span class="chip">TAMP backup reg</span></div></div>
+        </div>
+        <div class="layer">
+          <div><h4>Platform contract</h4><div class="where">mc_platform.h</div></div>
+          <div><p>About ten functions: <code>rx_read</code>, <code>rx_pending</code>, <code>tx_start</code>, <code>tx_busy</code>, <code>tx_abort</code>, <code>hw_stats</code>, <code>now_ms</code>. The same contract has three implementations: the STM32 board, a scripted fake for unit tests, and a TCP simulator.</p>
+          <div class="chips"><span class="chip">mc_platform.c</span><span class="chip">fake_platform.c</span><span class="chip">mc_sim.c</span></div></div>
+        </div>
+        <div class="layer hl">
+          <div><h4>Application</h4><div class="where">mc_app.c</div></div>
+          <div><p>Ties everything together:</p>
+          <ul class="plain">
+            <li>receive integrity, routing, admission (all-or-nothing and urgent), and transmit servicing with stall recovery;</li>
+            <li>per-DataController health, the <code>mc_*</code> commands, and rate-limited <code>[MC]</code> reporting.</li>
+          </ul></div>
+        </div>
+        <div class="layer core">
+          <div><h4>Pure core</h4><div class="where">mc_router.c · mc_line.c · mc_txq.c · mc_config.h</div></div>
+          <div><p>Stateless rules and data structures: address parsing and stop detection, retagging, the bounded line builder, and the whole-line transmit queue. No I/O, and no knowledge of time.</p>
+          <div class="chips"><span class="chip">mc_router</span><span class="chip">mc_line</span><span class="chip">mc_txq</span><span class="chip">mc_config</span></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 04 -->
+    <section id="loop">
+      <div class="sec-head"><span class="sec-no">04</span><h2>Execution model</h2></div>
+      <p class="sec-intro">There is no RTOS and there are no queues inside interrupts. DMA moves received bytes into memory with no CPU involvement. Interrupts refill the transmit FIFO and set one flag when a line has finished sending. Every decision is made in a single main loop, so no queue is ever touched from two contexts and nothing needs locking.</p>
+      <div class="lanes">
+        <div class="lane">
+          <h4>Main loop <span>mc_board_poll(), runs continuously</span></h4>
+          <ol>
+            <li>Measure the time since the last pass. A gap long enough to fill a receive ring is recorded as a possible overrun.</li>
+            <li>For every port, count and clear the framing, noise and parity flags, and restart the RX DMA if its stream or <code>DMAR</code> bit has stopped.</li>
+            <li><code>mc_app_poll()</code>: receive and route laptop lines, then receive and retag DataController lines (at most 4 KB per port per pass).</li>
+            <li>Health checks: DataController online/offline changes, congestion reports, line-error warnings, and a pending status request.</li>
+            <li>Transmit for each of the 8 ports: retire a finished line, abort a stalled one, and start the next whole line.</li>
+            <li>Update the LEDs, refresh the watchdog (only here), and record the worst loop time.</li>
+          </ol>
+        </div>
+        <div class="lane isr">
+          <h4>Interrupt &amp; DMA context <span>minimal by design</span></h4>
+          <ul>
+            <li><strong>RX DMA:</strong> circular, byte-wide and interrupt-free. The main loop reads the DMA counter to find new data.</li>
+            <li><strong>UART IRQ:</strong> the HAL TX routine refills the FIFO 8 bytes at a time. Error interrupts are deliberately left off, so a framing error can never abort reception.</li>
+            <li><strong>TX complete:</strong> <code>HAL_UART_TxCpltCallback</code> clears the port's busy flag, and nothing else.</li>
+            <li><strong>Button:</strong> the EXTI callback sets a flag that requests a status report.</li>
+            <li><strong>Faults:</strong> HardFault, MemManage, BusFault, UsageFault, NMI and <code>Error_Handler</code> record a reason code, then reset the board.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 05 -->
+    <section id="downstream">
+      <div class="sec-head"><span class="sec-no">05</span><h2>Laptop → boards</h2></div>
+      <p class="sec-intro">A command moves through seven stages from the laptop's UART to the DataController wires. Each stage either passes a complete line on, or stops it and replies with an <code>[MC] E:</code> message. Nothing is ever partly sent.</p>
+      <figure>
+        <div class="diagram w-1100">
+          <svg viewBox="0 0 1180 290" role="img" aria-labelledby="down-t">
+            <title id="down-t">Downstream pipeline from laptop RX to DataController TX</title>
+            <defs>
+              <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5B9BFF"/></marker>
+              <marker id="ahx" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#EF6B73"/></marker>
+              <marker id="ahw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#E3B341"/></marker>
+            </defs>
+            <g>
+              <rect class="b"  x="10"   y="40" width="140" height="84" rx="9"/>
+              <text class="t" x="80" y="66" text-anchor="middle">RX DMA ring</text>
+              <text class="tm" x="80" y="88" text-anchor="middle">USART2 · 48 KB</text>
+              <text class="tm" x="80" y="106" text-anchor="middle">circular, no IRQ</text>
+
+              <rect class="b"  x="180"  y="40" width="140" height="84" rx="9"/>
+              <text class="t" x="250" y="66" text-anchor="middle">Line builder</text>
+              <text class="tm" x="250" y="88" text-anchor="middle">CR/LF · ≤512 chars</text>
+              <text class="tm" x="250" y="106" text-anchor="middle">0x00 frames dropped</text>
+
+              <rect class="b"  x="350"  y="40" width="140" height="84" rx="9"/>
+              <text class="t" x="420" y="66" text-anchor="middle">Integrity gate</text>
+              <text class="tm" x="420" y="88" text-anchor="middle">printable ASCII</text>
+              <text class="tm" x="420" y="106" text-anchor="middle">UART-error check</text>
+
+              <rect class="ba" x="520"  y="40" width="140" height="84" rx="9"/>
+              <text class="t" x="590" y="66" text-anchor="middle">Router</text>
+              <text class="ta" x="590" y="88" text-anchor="middle">@n · #k · mc_ · all</text>
+              <text class="tm" x="590" y="106" text-anchor="middle">stop/cancel urgent</text>
+
+              <rect class="b"  x="690"  y="40" width="140" height="84" rx="9"/>
+              <text class="t" x="760" y="66" text-anchor="middle">Admission</text>
+              <text class="tm" x="760" y="88" text-anchor="middle">urgent: purge+insert</text>
+              <text class="tm" x="760" y="106" text-anchor="middle">else all-or-nothing</text>
+
+              <rect class="bc" x="860"  y="40" width="140" height="84" rx="9"/>
+              <text class="t" x="930" y="66" text-anchor="middle">6 × TX queue</text>
+              <text class="tc" x="930" y="88" text-anchor="middle">96 whole lines</text>
+              <text class="tm" x="930" y="106" text-anchor="middle">4 kept for stops</text>
+
+              <rect class="b"  x="1030" y="40" width="140" height="84" rx="9"/>
+              <text class="t" x="1100" y="66" text-anchor="middle">UART TX</text>
+              <text class="tm" x="1100" y="88" text-anchor="middle">IT + 16 B FIFO</text>
+              <text class="tm" x="1100" y="106" text-anchor="middle">57 600 baud</text>
+            </g>
+            <g>
+              <line class="la" x1="150" y1="82" x2="178" y2="82" marker-end="url(#ah2)"/>
+              <line class="la" x1="320" y1="82" x2="348" y2="82" marker-end="url(#ah2)"/>
+              <line class="la" x1="490" y1="82" x2="518" y2="82" marker-end="url(#ah2)"/>
+              <line class="la" x1="660" y1="82" x2="688" y2="82" marker-end="url(#ah2)"/>
+              <line class="la" x1="830" y1="82" x2="858" y2="82" marker-end="url(#ah2)"/>
+              <line class="la" x1="1000" y1="82" x2="1028" y2="82" marker-end="url(#ah2)"/>
+            </g>
+            <text class="tm" x="80" y="26" text-anchor="middle">bytes</text>
+            <text class="tm" x="420" y="26" text-anchor="middle">line</text>
+            <text class="tm" x="760" y="26" text-anchor="middle">route</text>
+            <text class="tm" x="1100" y="26" text-anchor="middle">bytes on the wire</text>
+            <!-- branches -->
+            <line class="lx" x1="420" y1="124" x2="420" y2="196" marker-end="url(#ahx)"/>
+            <rect class="bx" x="340" y="198" width="160" height="62" rx="8"/>
+            <text class="t" x="420" y="222" text-anchor="middle">Rejected</text>
+            <text class="tx" x="420" y="243" text-anchor="middle">[MC] E: … not sent</text>
+
+            <line class="lw" x1="590" y1="124" x2="590" y2="196" marker-end="url(#ahw)"/>
+            <rect class="bw" x="510" y="198" width="160" height="62" rx="8"/>
+            <text class="t" x="590" y="222" text-anchor="middle">mc_* command</text>
+            <text class="tw" x="590" y="243" text-anchor="middle">status · ping · help</text>
+
+            <line class="lx" x1="760" y1="124" x2="760" y2="196" marker-end="url(#ahx)"/>
+            <rect class="bx" x="680" y="198" width="160" height="62" rx="8"/>
+            <text class="t" x="760" y="222" text-anchor="middle">Refused</text>
+            <text class="tx" x="760" y="243" text-anchor="middle">[MC] E: busy (DCk)</text>
+          </svg>
+        </div>
+        <figcaption><b>Downstream path.</b> Four kinds of line are rejected with a reply: non-printable bytes, lines that arrived around a UART error, invalid addresses, and lines too long to accept. <code>mc_*</code> commands never leave the MasterController. A broadcast is refused only if some DataController's queue is already full.</figcaption>
+      </figure>
+
+      <h3>Admission, in two rules</h3>
+      <div class="grid2">
+        <div class="card"><span class="k">Ordinary lines</span><h4>All-or-nothing</h4><p>Every target queue is checked before any copy is made. A broadcast needs space in all six, and each queue always keeps back its 4 reserved slots. If any one is full, no DataController receives the line, and the laptop gets one clear <code>busy</code> reply.</p></div>
+        <div class="card"><span class="k">stop · cancel · @0 stop_all</span><h4>Purge, then jump the queue</h4><p>Unsent ordinary lines for the same boards are discarded and the count is reported. The stop is then placed right behind the line currently on the wire, and behind any earlier stops. It can use the reserved slots.</p></div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 06 -->
+    <section id="upstream">
+      <div class="sec-head"><span class="sec-no">06</span><h2>Boards → laptop</h2></div>
+      <p class="sec-intro">Six independent streams are merged into one. Each DataController has its own ring buffer and line builder, so a slow or noisy link can't damage another's lines. Each finished line is renumbered and queued as one unit on the laptop link.</p>
+      <figure>
+        <div class="diagram w-1100">
+          <svg viewBox="0 0 1180 268" role="img" aria-labelledby="up-t">
+            <title id="up-t">Upstream pipeline from six DataController RX rings to the laptop</title>
+            <defs>
+              <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#46C2CB"/></marker>
+              <marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#E3B341"/></marker>
+            </defs>
+            <!-- stacked rings to suggest six -->
+            <rect class="b" x="22" y="30" width="190" height="84" rx="9" opacity=".45"/>
+            <rect class="b" x="16" y="36" width="190" height="84" rx="9" opacity=".7"/>
+            <rect class="b" x="10" y="42" width="190" height="84" rx="9"/>
+            <text class="t" x="105" y="68" text-anchor="middle">6 × RX DMA ring</text>
+            <text class="tm" x="105" y="90" text-anchor="middle">8 KB each</text>
+            <text class="tm" x="105" y="108" text-anchor="middle">holds &gt; watchdog time</text>
+
+            <rect class="b" x="245" y="42" width="190" height="84" rx="9"/>
+            <text class="t" x="340" y="68" text-anchor="middle">Line builder</text>
+            <text class="tm" x="340" y="90" text-anchor="middle">one per DataController</text>
+            <text class="tm" x="340" y="108" text-anchor="middle">resync on input loss</text>
+
+            <rect class="ba" x="480" y="42" width="190" height="84" rx="9"/>
+            <text class="t" x="575" y="68" text-anchor="middle">Retag</text>
+            <text class="ta" x="575" y="90" text-anchor="middle">[ESV2-2] → [ESV2-2k]</text>
+            <text class="tm" x="575" y="108" text-anchor="middle">otherwise [DC-k] …</text>
+
+            <rect class="bc" x="715" y="42" width="190" height="84" rx="9"/>
+            <text class="t" x="810" y="68" text-anchor="middle">PC TX queue</text>
+            <text class="tc" x="810" y="90" text-anchor="middle">256 whole lines</text>
+            <text class="tm" x="810" y="108" text-anchor="middle">4 kept for [MC]</text>
+
+            <rect class="b" x="950" y="42" width="190" height="84" rx="9"/>
+            <text class="t" x="1045" y="68" text-anchor="middle">UART TX</text>
+            <text class="tm" x="1045" y="90" text-anchor="middle">USART2 · 921 600</text>
+            <text class="tm" x="1045" y="108" text-anchor="middle">IT + FIFO</text>
+
+            <line class="lc" x1="200" y1="84" x2="243" y2="84" marker-end="url(#ah3)"/>
+            <line class="lc" x1="435" y1="84" x2="478" y2="84" marker-end="url(#ah3)"/>
+            <line class="lc" x1="670" y1="84" x2="713" y2="84" marker-end="url(#ah3)"/>
+            <line class="lc" x1="905" y1="84" x2="948" y2="84" marker-end="url(#ah3)"/>
+
+            <rect class="bw" x="715" y="190" width="190" height="62" rx="8"/>
+            <text class="t" x="810" y="215" text-anchor="middle">[MC] messages</text>
+            <text class="tw" x="810" y="236" text-anchor="middle">boot · health · replies</text>
+            <line class="lw" x1="810" y1="190" x2="810" y2="130" marker-end="url(#ah4)"/>
+
+            <rect class="b" x="950" y="190" width="190" height="62" rx="8"/>
+            <text class="t" x="1045" y="215" text-anchor="middle">Diagnostics mirror</text>
+            <text class="tm" x="1045" y="236" text-anchor="middle">USART3 · ST-LINK VCP</text>
+            <line class="lw" x1="905" y1="221" x2="948" y2="221" marker-end="url(#ah4)"/>
+
+            <text class="tm" x="340" y="164" text-anchor="middle">bytes from a partial line</text>
+            <text class="tm" x="340" y="182" text-anchor="middle">are never joined across a gap</text>
+          </svg>
+        </div>
+        <figcaption><b>Upstream path.</b> Six DataControllers at 57 600 baud deliver at most about 35 KB/s combined. The 921 600 laptop link carries about 92 KB/s, so the merged stream has roughly 2.6× headroom. Any dropped line is counted and reported, and the 4 slots reserved for <code>[MC]</code> messages mean the warning itself always gets through.</figcaption>
+      </figure>
+    </section>
+
+    <!-- ===================================================== 07 -->
+    <section id="rules">
+      <div class="sec-head"><span class="sec-no">07</span><h2>Addressing &amp; tagging rules</h2></div>
+      <p class="sec-intro">These rules live in <code>mc_router.c</code>. They are pure functions with no state, which is why they're the most thoroughly tested part of the code.</p>
+      <h3>Laptop → boards</h3>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Laptop sends</th><th>Goes to</th><th>Wire text</th><th>Queue tag</th></tr></thead>
+          <tbody>
+            <tr><td><code>@7 start_sweep</code></td><td>DC4 (⌈7/2⌉), its board 1</td><td><code>@1 start_sweep</code></td><td>board 1</td></tr>
+            <tr><td><code>@12 get freq</code></td><td>DC6, its board 2</td><td><code>@2 get freq</code></td><td>board 2</td></tr>
+            <tr><td><code>#3 enable_pump</code></td><td>DC3 only</td><td><code>enable_pump</code></td><td>both</td></tr>
+            <tr><td><code>start_defog</code>, <code>@0 play_all</code></td><td>all six DataControllers</td><td>unchanged</td><td>both</td></tr>
+            <tr><td><code>stop</code>, <code>cancel</code>, <code>@0 stop_all</code></td><td>as addressed</td><td>unchanged</td><td><span class="pill crit">urgent</span></td></tr>
+            <tr><td><code>mc_status</code> …</td><td>the MasterController</td><td>—</td><td>—</td></tr>
+            <tr><td><code>@13 x</code>, <code>@01 x</code>, <code>#7 x</code>, <code>@1</code></td><td>nowhere</td><td><code>[MC] E: invalid … address</code></td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Boards → laptop (DataController <em>k</em>)</h3>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>DataController k sends</th><th>Laptop receives</th><th>Example for k = 3</th></tr></thead>
+          <tbody>
+            <tr><td><code>[ESV2-1] …</code> / <code>[ESV2-2] …</code></td><td><code>[ESV2-(2k−1)]</code> / <code>[ESV2-2k]</code></td><td><code>[ESV2-5] Evaporation Sweep Completed</code></td></tr>
+            <tr><td><code>TX to ESV2-1: …</code></td><td><code>TX to ESV2-(2k−1): …</code></td><td><code>TX to ESV2-5: start_sweep</code></td></tr>
+            <tr><td><code>Board2 Temp: …</code></td><td><code>Board2k Temp: …</code></td><td><code>Board6 Temp: 31.2</code></td></tr>
+            <tr><td>anything else</td><td><code>[DC-k] …</code></td><td><code>[DC-3] PZT Temp: 24.5 C</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===================================================== 08 -->
+    <section id="queues">
+      <div class="sec-head"><span class="sec-no">08</span><h2>Whole-line queues</h2></div>
+      <p class="sec-intro">Each queue (<code>mc_txq</code>) is a pool of fixed 522-byte slots, and each slot holds exactly one complete line. The UART only ever sends one whole slot at a time. Reordering or purging the queue therefore can't produce half a line, because a partial line never exists in a queue.</p>
+      <div class="q" aria-label="Example DataController queue order after a stalled transmission and two stops">
+        <div class="slot lock"><small>on the wire · locked</small>@1 upload_line_17</div>
+        <span class="q-arrow">→</span>
+        <div class="slot front"><small>push_front · after abort</small>CRLF</div>
+        <span class="q-arrow">→</span>
+        <div class="slot urg"><small>urgent · 1st</small>@1 stop</div>
+        <span class="q-arrow">→</span>
+        <div class="slot urg"><small>urgent · 2nd</small>cancel</div>
+        <span class="q-arrow">→</span>
+        <div class="slot ord"><small>ordinary · board 2</small>@2 get volt</div>
+        <span class="q-arrow">→</span>
+        <div class="slot gone"><small>purged by stop</small>@1 upload_line_18</div>
+      </div>
+      <p class="stack-note">Example DataController queue, send order left to right.</p>
+      <ul class="plain">
+        <li><strong>Locked head:</strong> the line currently being sent can never be moved or purged.</li>
+        <li><strong>Front insert:</strong> <code>push_front</code> is used only for the CRLF that ends an aborted line. It goes ahead of everything, including waiting stops.</li>
+        <li><strong>Urgent lines:</strong> they go after the head and after earlier urgent lines, so stops keep the order they were sent in. Urgent lines are never purged, so a later stop can't erase an earlier one.</li>
+        <li><strong>Purge:</strong> removes only ordinary lines whose board tag overlaps the stop's target, and reports how many.</li>
+        <li><strong>Reserve:</strong> ordinary traffic may only use a queue while more than 4 slots are free, so a stop always has room.</li>
+      </ul>
+    </section>
+
+    <!-- ===================================================== 09 -->
+    <section id="states">
+      <div class="sec-head"><span class="sec-no">09</span><h2>State machines</h2></div>
+
+      <h3>Line builder (<code>mc_line</code>), one per port</h3>
+      <figure>
+        <div class="diagram w-760">
+          <svg viewBox="0 0 760 380" role="img" aria-labelledby="fsm-t">
+            <title id="fsm-t">Line builder states: TEXT, DISCARD, BINARY</title>
+            <defs>
+              <marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8B97AD"/></marker>
+              <marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5B9BFF"/></marker>
+            </defs>
+            <rect class="ba" x="95"  y="158" width="150" height="64" rx="32"/>
+            <text class="th" x="170" y="195" text-anchor="middle">TEXT</text>
+            <rect class="bw" x="485" y="48"  width="150" height="64" rx="32"/>
+            <text class="th" x="560" y="85" text-anchor="middle">DISCARD</text>
+            <rect class="bx" x="485" y="268" width="150" height="64" rx="32"/>
+            <text class="th" x="560" y="305" text-anchor="middle">BINARY</text>
+
+            <!-- init -->
+            <line class="la" x1="22" y1="190" x2="93" y2="190" marker-end="url(#ah6)"/>
+            <text class="ta" x="52" y="180" text-anchor="middle">init</text>
+            <!-- self loops -->
+            <path class="ln" d="M142,158 C120,104 222,104 200,158" marker-end="url(#ah5)"/>
+            <text class="t2" x="170" y="96" text-anchor="middle">byte → append</text>
+            <path class="ln" d="M142,222 C120,276 222,276 200,222" marker-end="url(#ah5)"/>
+            <text class="t2" x="170" y="292" text-anchor="middle">CR/LF → line READY</text>
+            <text class="tm" x="170" y="309" text-anchor="middle">(empty → BOUNDARY)</text>
+            <!-- TEXT -> DISCARD -->
+            <line class="ln" x1="245" y1="170" x2="483" y2="72" marker-end="url(#ah5)"/>
+            <text class="t2" x="318" y="121" text-anchor="middle">&gt; 512 chars</text>
+            <text class="tw" x="318" y="137" text-anchor="middle">OVERLONG</text>
+            <!-- DISCARD -> TEXT -->
+            <line class="ln" x1="485" y1="98" x2="247" y2="186" marker-end="url(#ah5)"/>
+            <text class="t2" x="414" y="152" text-anchor="middle">CR/LF</text>
+            <text class="tm" x="414" y="168" text-anchor="middle">BOUNDARY</text>
+            <!-- TEXT -> BINARY -->
+            <line class="ln" x1="245" y1="210" x2="483" y2="294" marker-end="url(#ah5)"/>
+            <text class="t2" x="330" y="273" text-anchor="middle">0x00</text>
+            <text class="tm" x="330" y="289" text-anchor="middle">partial line dropped</text>
+            <!-- BINARY -> TEXT -->
+            <path class="ln" d="M500,326 C400,372 250,352 188,224" marker-end="url(#ah5)"/>
+            <text class="t2" x="420" y="366" text-anchor="middle">closing 0x00 → frame discarded</text>
+            <!-- DISCARD <-> BINARY -->
+            <line class="ln" x1="540" y1="112" x2="540" y2="266" marker-end="url(#ah5)"/>
+            <text class="t2" x="530" y="194" text-anchor="end">0x00</text>
+            <line class="ln" x1="600" y1="268" x2="600" y2="114" marker-end="url(#ah5)"/>
+            <text class="t2" x="612" y="186">&gt; 160 bytes</text>
+            <text class="tm" x="612" y="202">no closing 0x00</text>
+            <!-- resync -->
+            <line class="la" x1="742" y1="80" x2="637" y2="80" marker-end="url(#ah6)"/>
+            <text class="ta" x="690" y="66" text-anchor="middle">resync()</text>
+            <text class="tm" x="690" y="100" text-anchor="middle">input lost</text>
+          </svg>
+        </div>
+        <figcaption><b>Why DISCARD matters.</b> DISCARD throws bytes away up to the next line ending. Overlong lines use it so their tail can never run as a command. A DMA restart or a ring overflow also forces a port into DISCARD, so the rest of a line whose start was lost is never mistaken for a complete one.</figcaption>
+      </figure>
+
+      <h3>DataController health</h3>
+      <figure>
+        <div class="diagram w-760">
+          <svg viewBox="0 0 820 250" role="img" aria-labelledby="hl-t">
+            <title id="hl-t">DataController health states</title>
+            <defs>
+              <marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8B97AD"/></marker>
+            </defs>
+            <rect class="b2"  x="20"  y="96"  width="140" height="56" rx="10"/>
+            <text class="th" x="90" y="129" text-anchor="middle">UNSEEN</text>
+            <rect class="bok" x="340" y="20"  width="150" height="56" rx="10"/>
+            <text class="th" x="415" y="53" text-anchor="middle">ONLINE</text>
+            <rect class="bx"  x="660" y="96"  width="140" height="56" rx="10"/>
+            <text class="th" x="730" y="129" text-anchor="middle">OFFLINE</text>
+            <rect class="bw"  x="340" y="176" width="150" height="56" rx="10"/>
+            <text class="th" x="415" y="209" text-anchor="middle">NOT DETECTED</text>
+
+            <line class="ln" x1="160" y1="110" x2="338" y2="52" marker-end="url(#ah7)"/>
+            <text class="t2" x="232" y="64" text-anchor="middle">first byte</text>
+            <text class="tok" x="232" y="80" text-anchor="middle">I: DCk online</text>
+
+            <line class="ln" x1="160" y1="140" x2="338" y2="200" marker-end="url(#ah7)"/>
+            <text class="t2" x="238" y="190" text-anchor="middle">3 s after boot</text>
+            <text class="tw" x="238" y="206" text-anchor="middle">W: not detected</text>
+
+            <line class="ln" x1="415" y1="176" x2="415" y2="78" marker-end="url(#ah7)"/>
+            <text class="t2" x="425" y="132">first byte</text>
+
+            <line class="ln" x1="490" y1="40" x2="658" y2="106" marker-end="url(#ah7)"/>
+            <text class="t2" x="590" y="50" text-anchor="middle">3 s silent</text>
+            <text class="tx" x="590" y="66" text-anchor="middle">W: offline</text>
+
+            <path class="ln" d="M660,142 Q560,168 492,68" marker-end="url(#ah7)"/>
+            <text class="t2" x="610" y="178" text-anchor="middle">bytes again</text>
+            <text class="tok" x="610" y="194" text-anchor="middle">I: online</text>
+          </svg>
+        </div>
+        <figcaption>Each F401 prints <code>PZT Temp</code> every 500 ms, so 3 seconds of silence reliably means the DataController or its cable has gone. Only changes of state are reported, and a DataController that is offline turns the red LED on.</figcaption>
+      </figure>
+
+      <h3>Transmit slot lifecycle</h3>
+      <figure>
+        <div class="diagram w-760">
+          <svg viewBox="0 0 860 280" role="img" aria-labelledby="tx-t">
+            <title id="tx-t">Transmit slot lifecycle</title>
+            <defs>
+              <marker id="ah8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8B97AD"/></marker>
+              <marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#EF6B73"/></marker>
+            </defs>
+            <rect class="b2" x="20"  y="96" width="130" height="58" rx="10"/><text class="th" x="85"  y="130" text-anchor="middle">FREE</text>
+            <rect class="bc" x="230" y="96" width="130" height="58" rx="10"/><text class="th" x="295" y="130" text-anchor="middle">QUEUED</text>
+            <rect class="ba" x="460" y="96" width="130" height="58" rx="10"/><text class="th" x="525" y="124" text-anchor="middle">IN FLIGHT</text><text class="tm" x="525" y="142" text-anchor="middle">head locked</text>
+            <rect class="bx" x="690" y="96" width="140" height="58" rx="10"/><text class="th" x="760" y="130" text-anchor="middle">ABORTED</text>
+
+            <line class="ln" x1="150" y1="125" x2="228" y2="125" marker-end="url(#ah8)"/>
+            <text class="t2" x="189" y="114" text-anchor="middle">push</text>
+            <line class="ln" x1="360" y1="125" x2="458" y2="125" marker-end="url(#ah8)"/>
+            <text class="t2" x="409" y="114" text-anchor="middle">tx_start</text>
+            <line class="lx" x1="590" y1="125" x2="688" y2="125" marker-end="url(#ah9)"/>
+            <text class="tx" x="639" y="114" text-anchor="middle">stall</text>
+
+            <path class="ln" d="M525,96 C480,26 130,26 85,94" marker-end="url(#ah8)"/>
+            <text class="t2" x="305" y="40" text-anchor="middle">TX-complete IRQ clears busy → pop</text>
+
+            <path class="ln" d="M295,154 C270,196 110,196 85,156" marker-end="url(#ah8)"/>
+            <text class="t2" x="190" y="182" text-anchor="middle">purged by stop</text>
+
+            <path class="lx" d="M760,154 C735,262 110,268 60,156" marker-end="url(#ah9)"/>
+            <text class="tx" x="410" y="252" text-anchor="middle">pop · CRLF pushed to the front</text>
+          </svg>
+        </div>
+        <figcaption>Each line has a time budget: its wire time at 10 bits per byte, plus 100 ms. A line still sending after that is aborted. Part of it may already have gone out, so a CRLF is sent next, ahead of any waiting stops. That ends the fragment as its own line so it can't join onto the next command.</figcaption>
+      </figure>
+    </section>
+
+    <!-- ===================================================== 10 -->
+    <section id="integrity">
+      <div class="sec-head"><span class="sec-no">10</span><h2>Integrity &amp; recovery</h2></div>
+      <p class="sec-intro">A command router is only safe if damaged or interrupted input can never become a <em>different</em> valid command. For example, a lost letter can turn <code>start_sweep</code> into <code>tart_sweep</code>, and a lost line ending can merge two commands into one. These are the defenses, strongest guarantees first.</p>
+
+      <h3>UART errors on the laptop link</h3>
+      <p>The UART drops any byte received with a framing or noise error, and its flag only says that an error happened, not where. So when the flag changes, the MasterController notes how much data has arrived up to that moment, including bytes still waiting in the ring buffer. Every line holding a byte from before that point is discarded, however much input was buffered.</p>
+      <figure>
+        <div class="diagram w-760">
+          <svg viewBox="0 0 900 230" role="img" aria-labelledby="taint-t">
+            <title id="taint-t">Which laptop lines are discarded after a UART error</title>
+            <rect x="40" y="46" width="300" height="26" rx="4" fill="#1B3358" stroke="#5B9BFF" stroke-width="1.2"/>
+            <rect x="340" y="46" width="240" height="26" rx="4" fill="#143A44" stroke="#46C2CB" stroke-width="1.2"/>
+            <rect x="580" y="46" width="280" height="26" rx="4" fill="#1A2436" stroke="#34445F" stroke-width="1.2"/>
+            <text class="ta" x="190" y="63" text-anchor="middle">already read</text>
+            <text class="tc" x="460" y="63" text-anchor="middle">still in the DMA ring</text>
+            <text class="tm" x="720" y="63" text-anchor="middle">arrives afterwards</text>
+            <line x1="580" y1="24" x2="580" y2="200" stroke="#E3B341" stroke-width="2" stroke-dasharray="4 3"/>
+            <text class="tw" x="586" y="30">error seen here</text>
+
+            <rect x="40"  y="104" width="130" height="22" rx="4" fill="#3C181D" stroke="#EF6B73"/>
+            <rect x="176" y="104" width="222" height="22" rx="4" fill="#3C181D" stroke="#EF6B73"/>
+            <rect x="404" y="104" width="176" height="22" rx="4" fill="#3C181D" stroke="#EF6B73"/>
+            <rect x="580" y="104" width="120" height="22" rx="4" fill="#3A2E12" stroke="#E3B341"/>
+            <rect x="740" y="104" width="120" height="22" rx="4" fill="#143826" stroke="#4CC38A"/>
+            <text class="tx" x="105" y="119" text-anchor="middle">line</text>
+            <text class="tx" x="287" y="119" text-anchor="middle">line</text>
+            <text class="tx" x="492" y="119" text-anchor="middle">line</text>
+            <text class="tw" x="640" y="119" text-anchor="middle">line</text>
+            <text class="tok" x="800" y="119" text-anchor="middle">line</text>
+
+            <text class="t2" x="310" y="156" text-anchor="middle">discarded: may contain the lost byte</text>
+            <text class="t2" x="640" y="156" text-anchor="middle">discarded if it starts</text>
+            <text class="t2" x="640" y="172" text-anchor="middle">within 5 ms</text>
+            <text class="t2" x="800" y="156" text-anchor="middle">forwarded</text>
+            <text class="tm" x="310" y="198" text-anchor="middle">reported as uart_err_lines</text>
+          </svg>
+        </div>
+        <figcaption>A line that starts right at the error point is also discarded if its first byte arrives within 5 ms, because the lost byte may have been its first character. The laptop sends each line as one burst, so a command typed later is never affected. This can occasionally discard a clean line, but it never forwards a damaged one.</figcaption>
+      </figure>
+
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Failure</th><th>Detection</th><th>Response</th><th>Report</th></tr></thead>
+          <tbody>
+            <tr><td>Framing / noise error</td><td>USART <code>ISR</code> FE/NE/PE flags, checked every loop pass and again after each read</td><td>Laptop link: discard lines as above. DC links: count and warn.</td><td><span class="pill warn">W: … UART error(s)</span></td></tr>
+            <tr><td>Non-printable bytes</td><td>Any byte outside 0x20–0x7E (tab allowed)</td><td>Line rejected</td><td><span class="pill crit">E: non-printable</span></td></tr>
+            <tr><td>Binary COBS frame</td><td>A 0x00 byte</td><td>Frame discarded; 0x00 is never sent downstream</td><td><span class="pill crit">E: binary … not supported</span></td></tr>
+            <tr><td>Line longer than 512</td><td>Line builder</td><td>Discarded up to its line ending</td><td><span class="pill crit">E: longer than 512</span></td></tr>
+            <tr><td>Main-loop stall</td><td>Gap between passes ≥ ¾ of the time to fill a ring</td><td>Line builder resync on that port</td><td><span class="pill warn">W: input lost</span></td></tr>
+            <tr><td>RX DMA stopped</td><td>Stream <code>EN</code> or <code>CR3.DMAR</code> cleared</td><td>Abort and restart; re-initialise the handle if needed; resync. After 50 failed tries, reset the board.</td><td><span class="pill warn">W: input lost</span> <span class="pill crit">DMA_FAILURE</span></td></tr>
+            <tr><td>TX stall</td><td>Line still sending after its wire time + 100 ms</td><td>Abort, then send a CRLF ahead of everything</td><td><code>stalls=</code></td></tr>
+            <tr><td>Queue full</td><td>Admission check</td><td>Refuse the whole line (and a broadcast for all six)</td><td><span class="pill crit">E: busy</span></td></tr>
+            <tr><td>Main loop hung</td><td>IWDG, ≈1 s</td><td>Hardware reset</td><td><span class="pill info">reset: WATCHDOG</span></td></tr>
+            <tr><td>CPU fault / HAL error</td><td>Fault vectors, <code>Error_Handler</code></td><td>Write reason to <code>TAMP-&gt;BKP0R</code>, then reset</td><td><span class="pill info">reset: HARDFAULT …</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note"><b>Design decision:</b> the ST HAL's interrupt handler aborts DMA reception on the first framing error, so it's never given UART error interrupts. The CubeMX setting "DMA disable on RX error" is also turned off at runtime (<code>CR3.DDRE</code> cleared, and <code>OVRDIS</code> set so an overrun can't block reception). Reception keeps running, and errors become counters instead of outages.</div>
+    </section>
+
+    <!-- ===================================================== 11 -->
+    <section id="observe">
+      <div class="sec-head"><span class="sec-no">11</span><h2>Observability</h2></div>
+      <p class="sec-intro">Everything the MasterController says begins with <code>[MC] </code>, so the GUI can log it or ignore it. The same lines are mirrored to the ST-LINK USB serial port at 115 200 baud, so they can be watched without touching the laptop link.</p>
+<pre class="term"><span class="p">&gt;</span> <span class="a">mc_status</span>
+<span class="c">[MC] status up=412s reset=POWER_ON loop_max=0ms mc_lost=0 busy=0</span>
+<span class="c">[MC] PC  USART2 PA2/PA3 921600 baud rx=18344 lines=611 tx=5210 q=0/256 overlong=0 binary=0 garbled=0 uart_err_lines=0 fe=0 ne=0 overruns=0 stalls=0</span>
+<span class="c">[MC] DC1 USART10 PE3/PE2 online @1,@2 last_rx=212ms rx=40211 lines=1733 up_drop=0 tx=94 q=0/96 rejected=0 purged=0 overlong=0 binary=0 fe=0 ne=0 overruns=0 dma_restarts=0 stalls=0</span>
+<span class="p">…</span>
+<span class="w">[MC] W: DC4 offline: silent for 3004 ms</span>
+<span class="w">[MC] W: 'stop' discarded 3 queued line(s) for DC2</span>
+<span class="x">[MC] E: busy (DC3 queue full), not sent: start_sweep</span></pre>
+      <p class="stack-note">Sample output for illustration, not captured from a board.</p>
+      <div class="grid2">
+        <div class="card"><span class="k">Commands</span><h4><code>mc_status</code> · <code>mc_ping</code> · <code>mc_version</code> · <code>mc_reset_stats</code> · <code>mc_help</code></h4><p>A status report has one summary line and one line per port. Every counter is listed so the commissioning script can require each one to be zero.</p></div>
+        <div class="card"><span class="k">On the board</span><h4>LEDs &amp; button</h4><p><span class="pill ok">green</span> 1 Hz heartbeat · <span class="pill warn">yellow</span> traffic · <span class="pill crit">red</span> a DataController offline or a drop in the last 2 s. The blue button prints a full <code>mc_status</code> report.</p></div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 12 -->
+    <section id="verify">
+      <div class="sec-head"><span class="sec-no">12</span><h2>Verification</h2></div>
+      <p class="sec-intro">Because the platform contract is so small, the same application code runs in three places: on the board, against a scripted fake, and inside a real-time simulator.</p>
+      <div class="grid3">
+        <div class="card"><span class="k">tests/host · C</span><h4>Unit &amp; app tests</h4><p>346 checks. <code>test_core</code> covers the queue, line builder and router. <code>test_app</code> covers the full application against the fake, with injected stalls, UART errors, DMA restarts, overruns and congestion. Built with <code>-Werror -Wconversion</code>.</p></div>
+        <div class="card"><span class="k">tests/host · mc_sim</span><h4>Simulator</h4><p>The real core behind a TCP socket, with DataController ports looped back and wire time emulated at each port's baud rate. It speaks to pyserial as <code>socket://localhost:5555</code>.</p></div>
+        <div class="card"><span class="k">tools · Python</span><h4>Loopback commissioning</h4><p>With TX-to-RX jumpers on each DataController port, it checks every route, broadcast atomicity, burst ordering and stop behavior, and requires a complete status report with every loss counter at zero. A self-test confirms it fails when the report is bad.</p></div>
+      </div>
+      <p>The firmware builds headless in STM32CubeIDE with 0 errors and 0 warnings in both Debug and Release. The <code>mc_*.c</code> sources also compile cleanly with <code>-Wextra -Wconversion -Wshadow -Wformat=2</code> for Cortex-M7. Hardware still needs validating before relying on it: electrical checks, clock accuracy, real UART and DMA faults, and the attached F401 and EVS2 boards.</p>
+    </section>
+
+    <!-- ===================================================== 13 -->
+    <section id="config">
+      <div class="sec-head"><span class="sec-no">13</span><h2>Configuration</h2></div>
+      <p class="sec-intro">Every tunable is in <code>Core/Inc/mc_config.h</code>, except the ring sizes, which live next to the DMA code in <code>mc_platform.c</code>.</p>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>MC_LINE_MAX</code></td><td class="num">512</td><td>Longest accepted line, excluding its terminator</td></tr>
+            <tr><td><code>MC_SLOT_BYTES</code></td><td class="num">522</td><td>Line + worst-case retag overhead + CRLF</td></tr>
+            <tr><td><code>MC_PC_TXQ_SLOTS</code></td><td class="num">256</td><td>Merged upstream queue</td></tr>
+            <tr><td><code>MC_DC_TXQ_SLOTS</code></td><td class="num">96</td><td>Per-DataController downstream queue (~50 KB of upload frames)</td></tr>
+            <tr><td><code>MC_TXQ_RESERVE</code></td><td class="num">4</td><td>Slots held back for stops (DC queues) and <code>[MC]</code> messages (PC queue)</td></tr>
+            <tr><td><code>MC_BIN_FRAME_MAX</code></td><td class="num">160</td><td>Beyond this, a "frame" with no closing 0x00 is treated as noise</td></tr>
+            <tr><td><code>MC_DC_SILENT_MS</code></td><td class="num">3000</td><td>Silence before a DataController is reported offline</td></tr>
+            <tr><td><code>MC_STARTUP_GRACE_MS</code></td><td class="num">3000</td><td>Time after boot before a DataController is reported not detected</td></tr>
+            <tr><td><code>MC_WARN_INTERVAL_MS</code></td><td class="num">1000</td><td>Rate limit for repeated warnings</td></tr>
+            <tr><td><code>MC_TAINT_GRACE_MS</code></td><td class="num">5</td><td>Window in which a line starting at the error point is also discarded</td></tr>
+            <tr><td><code>MC_TX_STALL_MARGIN_MS</code></td><td class="num">100</td><td>Time allowed beyond a line's wire time before it counts as stalled</td></tr>
+            <tr><td><code>PC_RX_BYTES</code> / <code>DC_RX_BYTES</code></td><td class="num">49 152 / 8 192</td><td>DMA ring sizes (DMA counter limit: 65 535)</td></tr>
+            <tr><td><code>DMA_RESTART_LIMIT</code></td><td class="num">50</td><td>Consecutive failed restarts before the board resets itself</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===================================================== 14 -->
+    <section id="files">
+      <div class="sec-head"><span class="sec-no">14</span><h2>File map</h2></div>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>File</th><th>Layer</th><th>Responsibility</th></tr></thead>
+          <tbody>
+            <tr><td><code>Core/Src/mc_router.c</code></td><td>pure core</td><td>Address parsing, stop detection, retagging</td></tr>
+            <tr><td><code>Core/Src/mc_line.c</code></td><td>pure core</td><td>Bounded line builder: TEXT / DISCARD / BINARY states, resync</td></tr>
+            <tr><td><code>Core/Src/mc_txq.c</code></td><td>pure core</td><td>Whole-line slot queue: urgent and front insert, tag purge, locked head</td></tr>
+            <tr><td><code>Core/Inc/mc_config.h</code></td><td>pure core</td><td>Every tunable</td></tr>
+            <tr><td><code>Core/Src/mc_app.c</code></td><td>application</td><td>Receive integrity, routing, admission, transmit service, health, <code>mc_*</code> commands</td></tr>
+            <tr><td><code>Core/Inc/mc_platform.h</code></td><td>contract</td><td>The hardware interface the application depends on</td></tr>
+            <tr><td><code>Core/Src/mc_platform.c</code></td><td>board</td><td>DMA RX, IT TX, flag polling, recovery, reset cause, LEDs, watchdog</td></tr>
+            <tr><td><code>Core/Src/main.c</code>, <code>stm32h7xx_it.c</code></td><td>generated</td><td>CubeMX init, plus hooks in USER CODE blocks</td></tr>
+            <tr><td><code>tests/host/*</code></td><td>verification</td><td>Unit and app tests, fake platform, simulator, script self-test</td></tr>
+            <tr><td><code>tools/loopback_test.py</code></td><td>verification</td><td>Hardware loopback commissioning</td></tr>
+            <tr><td><code>docs/binary-protocol.md</code></td><td>roadmap</td><td>Planned node renumbering for binary pass-through</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <footer>MasterController firmware v1.0.0 · NUCLEO-H7A3ZI-Q · Echovista. Generated from the source on branch <span class="mono">main</span>. See README.md for wiring and the commissioning checklist.</footer>
+    </section>
+  </main>
+</div>
