@@ -27,3 +27,6 @@ tests/host/*.exe
 tests/host/test_core
 tests/host/test_app
 tests/host/mc_sim
+
+# Python bytecode
+__pycache__/
