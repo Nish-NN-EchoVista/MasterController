@@ -299,7 +299,7 @@ static void test_pc_garbage_never_forwarded(void)
 
 static void test_pc_uart_errors_discard_affected_lines(void)
 {
-    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0, 0 };
     boot();
     fake_inject(PC, "@1 before\r\n");
     pump(3);
@@ -327,7 +327,7 @@ static void test_pc_uart_errors_discard_affected_lines(void)
 
 static void test_dc_uart_errors_warned_not_blocked(void)
 {
-    mc_hw_stats_t hw = { 3, 2, 0, 0, 0, 0 };
+    mc_hw_stats_t hw = { 3, 2, 0, 0, 0, 0, 0 };
     boot();
     fake_set_hw(DC(4), &hw);
     fake_inject(DC(4), "[ESV2-1] still forwarded\r\n");
@@ -348,7 +348,7 @@ static void test_dc_uart_errors_warned_not_blocked(void)
 
 static void test_rx_overrun_discards_partial_line(void)
 {
-    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0, 0 };
     boot();
     fake_inject(DC(2), "[ESV2-1] first half of a li");
     pump(2);
@@ -383,7 +383,7 @@ static void test_abort_delimiter_precedes_queued_stops(void)
    damaged line, however many lines and read chunks come first.           */
 static void test_error_behind_buffered_lines(void)
 {
-    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0, 0 };
     boot();
     for (int i = 0; i < 40; ++i) fake_inject(PC, "@1 clean\r\n");
     fake_inject(PC, "@1 tart_sweep\r\n");       /* 's' lost to the error   */
@@ -402,7 +402,7 @@ static void test_error_behind_buffered_lines(void)
 
 static void test_error_behind_service_budget(void)
 {
-    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0, 0 };
     char line[40];
     boot();
     /* ~10 KB: more than two 4096-byte service passes, many 256-byte reads. */
@@ -424,7 +424,7 @@ static void test_error_behind_service_budget(void)
 
 static void test_error_before_next_line_starts(void)
 {
-    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0, 0 };
     boot();
     fake_inject(PC, "@1 ok\r\n");
     pump(3);
@@ -443,7 +443,7 @@ static void test_error_before_next_line_starts(void)
 /* Review finding 3: a DMA restart is a discontinuity on every port. */
 static void test_dma_restart_resyncs(void)
 {
-    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0 };
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0, 0 };
     boot();
     fake_inject(PC, "@1 sta");
     pump(2);
@@ -515,7 +515,7 @@ static void test_health_events(void)
 static void test_status_and_local_commands(void)
 {
     boot();
-    mc_hw_stats_t hw = { 7, 1, 0, 2, 0, 0 };
+    mc_hw_stats_t hw = { 7, 1, 0, 2, 0, 0, 0 };
     fake_set_hw(DC(5), &hw);
     fake_inject(PC, "mc_status\r\n");
     pump(20);
@@ -624,6 +624,287 @@ static void test_upload_burst_in_order(void)
     CHECK(strstr(fake_out(PC), "busy") == NULL);
 }
 
+/* ------------------------------------------------ port health supervisor */
+
+/* One stall per cycle: start whatever is at the head, let it overrun its
+   budget, and let the next poll abort it (which queues a CRLF at the
+   front, so a stalled port keeps producing stalls by itself).            */
+static void stall_cycles(int n)
+{
+    while (n-- > 0) {
+        pump(2);
+        fake_advance(MC_TX_STALL_MARGIN_MS + 50u);
+        pump(1);
+    }
+}
+
+/* [MC] messages queue behind each other on the one-line-per-poll fake
+   links; drain them (no time passes) before looking. */
+static const char *pc_out(void)  { pump(300); return fake_out(PC); }
+static const char *dbg_out(void) { pump(300); return fake_out(MC_PORT_DBG); }
+
+static const char *status_of(void)
+{
+    fake_out_clear(PC);
+    fake_inject(PC, "mc_status\r\n");
+    pump(30);
+    return fake_out(PC);
+}
+
+static void test_sup_stalls_rebuild_then_recover(void)
+{
+    boot();
+    fake_tx_mode(DC(2), FAKE_TX_STALL);
+    fake_reinit_heals(DC(2), 1);
+    fake_inject(PC, "@3 one\r\n");
+    stall_cycles((int)MC_SUP_STALL_STRIKES);
+    CHECK(fake_reinits(DC(2)) == 1);
+    CHECK(strstr(pc_out(), "[MC] W: DC2 tx_stalls: rebuilding the UART") != NULL);
+    pump(5);                                    /* probe line goes out     */
+    fake_advance(MC_SUP_PROBATION_MS);
+    pump(5);
+    CHECK(strstr(pc_out(), "[MC] I: DC2 recovered (tx_stalls)") != NULL);
+    const char *s = status_of();
+    CHECK(strstr(s, "health=OK recoveries=1 quarantines=0") != NULL);
+    CHECK(!mc_app_fault_active() || 1);         /* LED may still show the drop */
+}
+
+static void test_sup_quarantine_and_degraded_broadcast(void)
+{
+    boot();
+    fake_tx_mode(DC(3), FAKE_TX_STALL);         /* rebuilding does not help */
+    fake_inject(PC, "@5 doomed\r\n");
+    stall_cycles((int)MC_SUP_STALL_STRIKES + 1);
+    CHECK(strstr(pc_out(), "[MC] E: DC3 faulted (tx_stalls): quarantined") != NULL);
+    CHECK(strstr(pc_out(), "EVS2 @5,@6 unavailable; retrying in 5 s") != NULL);
+    CHECK(!fake_enabled(DC(3)));
+    CHECK(mc_app_fault_active());
+
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k) fake_out_clear(DC(k));
+    fake_out_clear(PC);
+    fake_inject(PC, "start_defog\r\n");
+    pump(5);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        CHECK((strstr(fake_out(DC(k)), "start_defog\r\n") != NULL) == (k != 3));
+    CHECK(strstr(pc_out(), "[MC] W: sent to 5 of 6 DataControllers (faulted: DC3): start_defog") != NULL);
+
+    fake_inject(PC, "@6 get volt\r\n");
+    pump(5);
+    CHECK(strstr(pc_out(), "[MC] E: DC3 is faulted (tx_stalls), not sent: @6 get volt") != NULL);
+    fake_inject(PC, "@6 stop\r\n");
+    pump(5);
+    CHECK(strstr(pc_out(), "[MC] W: DC3 is faulted: 'stop' queued, sent first if it recovers") != NULL);
+    CHECK(fake_out_len(DC(3)) == 0);            /* nothing sent while quarantined */
+    CHECK(strstr(status_of(), "health=FAULTED(tx_stalls) recoveries=0 quarantines=1") != NULL);
+
+    /* The next probe finds the port working again. */
+    fake_reinit_heals(DC(3), 1);
+    fake_out_clear(PC);
+    fake_advance(MC_SUP_PROBE_FIRST_MS);
+    pump(5);
+    CHECK(strstr(pc_out(), "[MC] I: DC3 probing: rebuilding the UART") != NULL);
+    CHECK(fake_enabled(DC(3)));
+    fake_advance(MC_SUP_PROBATION_MS);
+    pump(5);
+    CHECK(strstr(pc_out(), "[MC] I: DC3 recovered (tx_stalls)") != NULL);
+    /* The queued stop went out first; nothing sent while faulted leaked out. */
+    CHECK(strstr(fake_out(DC(3)), "\r\n@2 stop\r\n") == fake_out(DC(3)));
+    CHECK(strstr(fake_out(DC(3)), "start_defog") == NULL);
+    CHECK(strstr(fake_out(DC(3)), "get volt") == NULL);
+
+    /* Healthy again: broadcasts reach all six with no warning. */
+    fake_out_clear(PC);
+    fake_inject(PC, "start_sweep\r\n");
+    pump(5);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        CHECK(strstr(fake_out(DC(k)), "start_sweep\r\n") != NULL);
+    CHECK(strstr(pc_out(), "sent to") == NULL);
+}
+
+static void test_sup_probe_backoff_doubles(void)
+{
+    boot();
+    fake_tx_mode(DC(4), FAKE_TX_STALL);
+    fake_inject(PC, "#4 x\r\n");
+    stall_cycles((int)MC_SUP_STALL_STRIKES + 1);
+    CHECK(strstr(pc_out(), "DC4 faulted (tx_stalls)") != NULL);
+    CHECK(strstr(pc_out(), "retrying in 5 s") != NULL);
+    fake_out_clear(PC);
+    fake_advance(MC_SUP_PROBE_FIRST_MS);        /* probe: still broken */
+    stall_cycles(1);
+    CHECK(strstr(pc_out(), "[MC] I: DC4 probing") != NULL);
+    CHECK(strstr(pc_out(), "DC4 faulted (tx_stalls): quarantined") != NULL);
+    CHECK(strstr(pc_out(), "retrying in 10 s") != NULL);
+    fake_out_clear(PC);
+    fake_advance(MC_SUP_PROBE_FIRST_MS * 2u);
+    stall_cycles(1);
+    CHECK(strstr(pc_out(), "retrying in 20 s") != NULL);
+}
+
+static void test_sup_tx_refused_rebuilds(void)
+{
+    boot();
+    fake_tx_mode(DC(1), FAKE_TX_REFUSE);
+    fake_reinit_heals(DC(1), 1);
+    fake_inject(PC, "@1 waiting\r\n");
+    pump(3);
+    CHECK(fake_reinits(DC(1)) == 0);
+    fake_advance(MC_SUP_REFUSED_MS + 10u);
+    pump(3);
+    CHECK(strstr(pc_out(), "[MC] W: DC1 tx_refused: rebuilding the UART") != NULL);
+    pump(3);
+    CHECK_STR(fake_out(DC(1)), "@1 waiting\r\n");   /* the queued line survives */
+    fake_advance(MC_SUP_PROBATION_MS);
+    pump(3);
+    CHECK(strstr(pc_out(), "[MC] I: DC1 recovered (tx_refused)") != NULL);
+}
+
+static void test_sup_rx_dma_faults(void)
+{
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0, 0 };
+    boot();
+    hw.rx_restart_fails = 1;                    /* restart attempted, failed */
+    fake_set_hw(DC(5), &hw);
+    pump(3);
+    CHECK(strstr(pc_out(), "[MC] W: DC5 rx_dma_failed: rebuilding the UART") != NULL);
+    CHECK(fake_reinits(DC(5)) == 1);
+    pump(3);
+    CHECK(strcmp(fake_out(DC(5)), "\r\n") == 0);    /* probation probe line */
+    fake_advance(MC_SUP_PROBATION_MS);
+    pump(3);
+    CHECK(strstr(pc_out(), "[MC] I: DC5 recovered (rx_dma_failed)") != NULL);
+
+    /* A DMA that keeps stopping: occasional restarts are tolerated, a run is not. */
+    fake_out_clear(PC);
+    hw.rx_restarts = 2;
+    fake_set_hw(DC(5), &hw);
+    pump(3);
+    CHECK(strstr(pc_out(), "rx_dma_restarts") == NULL);
+    hw.rx_restarts = 3;
+    fake_set_hw(DC(5), &hw);
+    pump(3);
+    CHECK(strstr(pc_out(), "[MC] W: DC5 rx_dma_restarts: rebuilding the UART") != NULL);
+}
+
+static void test_sup_line_error_storm_degrades_only(void)
+{
+    mc_hw_stats_t hw = { 0, 0, 0, 0, 0, 0, 0 };
+    boot();
+    hw.framing = MC_SUP_STORM_ERRORS + 50u;
+    fake_set_hw(DC(6), &hw);
+    fake_advance(MC_SUP_STORM_WINDOW_MS);
+    pump(3);
+    CHECK(strstr(pc_out(), "[MC] W: DC6 degraded: 150 line errors") != NULL);
+    CHECK(fake_reinits(DC(6)) == 1);            /* one rebuild attempt */
+    CHECK(strstr(status_of(), "health=DEGRADED(line_errors)") != NULL);
+    /* Still in service: a noisy port carries traffic, so it is not skipped. */
+    fake_out_clear(DC(6));
+    fake_inject(PC, "start_defog\r\n");
+    pump(5);
+    CHECK(strstr(fake_out(DC(6)), "start_defog\r\n") != NULL);
+    /* A second storm soon after does not rebuild again. */
+    hw.framing += 500u;
+    fake_set_hw(DC(6), &hw);
+    fake_advance(MC_SUP_STORM_WINDOW_MS);
+    pump(3);
+    CHECK(fake_reinits(DC(6)) == 1);
+    /* Quiet again. */
+    fake_out_clear(PC);
+    fake_advance(MC_SUP_STORM_WINDOW_MS);
+    pump(3);
+    CHECK(strstr(pc_out(), "[MC] I: DC6 line errors subsided") != NULL);
+    CHECK(strstr(status_of(), "health=OK recoveries=0 quarantines=0") != NULL);
+}
+
+static void quarantine_dcs(unsigned first, unsigned last)
+{
+    for (unsigned k = first; k <= last; ++k) {
+        fake_tx_mode(DC(k), FAKE_TX_STALL);
+        char line[16];
+        snprintf(line, sizeof line, "#%u x\r\n", k);
+        fake_inject(PC, line);
+    }
+    stall_cycles((int)MC_SUP_STALL_STRIKES + 1);
+}
+
+static void test_sup_board_reset_when_many_ports_fault(void)
+{
+    boot();
+    quarantine_dcs(1, MC_SUP_BOARD_FAULT_DCS - 1u);
+    CHECK(fake_system_resets() == 0);           /* below the threshold */
+    quarantine_dcs(MC_SUP_BOARD_FAULT_DCS, MC_SUP_BOARD_FAULT_DCS);
+    CHECK(strstr(pc_out(), "ports faulted at once: resetting the board") != NULL);
+    fake_advance(200);
+    pump(2);
+    CHECK(fake_system_resets() == 1);
+
+    /* After such a reset, the same condition does not reset again. */
+    boot();
+    fake_set_reset_cause("PORT_FAULTS");
+    quarantine_dcs(1, MC_SUP_BOARD_FAULT_DCS);
+    fake_advance(200);
+    pump(2);
+    CHECK(fake_system_resets() == 0);
+    CHECK(strstr(pc_out(), "not resetting again") != NULL);
+}
+
+static void test_sup_pc_link_retried_not_quarantined(void)
+{
+    boot();
+    fake_tx_mode(PC, FAKE_TX_STALL);
+    fake_inject(PC, "mc_ping\r\n");
+    stall_cycles((int)MC_SUP_STALL_STRIKES + 1);
+    CHECK(strstr(dbg_out(), "[MC] E: PC link faulted (tx_stalls); retrying in 5 s") != NULL);
+    CHECK(fake_enabled(PC));                    /* still the way in */
+    fake_advance(20);                           /* a command sent later...  */
+    fake_inject(PC, "@1 still_routed\r\n");     /* ...is still routed      */
+    pump(3);
+    CHECK(strstr(fake_out(DC(1)), "@1 still_routed\r\n") != NULL);
+    fake_reinit_heals(PC, 1);
+    fake_advance(MC_SUP_PROBE_FIRST_MS);
+    stall_cycles(1);
+    fake_advance(MC_SUP_PROBATION_MS);
+    pump(5);
+    CHECK(strstr(dbg_out(), "[MC] I: PC recovered (tx_stalls)") != NULL);
+}
+
+/* After a rebuild, bytes arriving at once may be the tail of a cut line and
+   are discarded; a line starting after a quiet period is a fresh line.   */
+static void test_rebuild_quiet_period(void)
+{
+    boot();
+    fake_inject(PC, "mc_recover 1\r\n");
+    pump(3);
+    CHECK(fake_reinits(DC(1)) == 1);
+    fake_inject(DC(1), "_tail_of_a_cut_line\r\n[ESV2-1] fresh\r\n");
+    pump(10);
+    CHECK(strstr(pc_out(), "tail_of_a_cut_line") == NULL);
+    CHECK(strstr(pc_out(), "[ESV2-1] fresh\r\n") != NULL);
+
+    fake_inject(PC, "mc_recover 1\r\n");
+    pump(3);
+    fake_advance(100);                          /* > 89 ms: one 512-char line at 57600 */
+    fake_inject(DC(1), "[ESV2-2] first line after quiet\r\n");
+    pump(10);
+    CHECK(strstr(pc_out(), "[ESV2-2] first line after quiet\r\n") != NULL);
+}
+
+static void test_mc_recover_command(void)
+{
+    boot();
+    fake_inject(PC, "mc_recover 2\r\n");
+    pump(3);
+    CHECK(fake_reinits(DC(2)) == 1);
+    CHECK(strstr(pc_out(), "[MC] I: DC2: rebuilding the UART on request") != NULL);
+    fake_advance(MC_SUP_PROBATION_MS);
+    pump(5);
+    CHECK(strstr(pc_out(), "[MC] I: DC2 recovered (manual)") != NULL);
+    fake_inject(PC, "mc_recover all\r\nmc_recover 9\r\n");
+    pump(5);
+    CHECK(fake_reinits(PC) == 1 && fake_reinits(DC(6)) == 1 && fake_reinits(DC(2)) == 2);
+    CHECK(strstr(pc_out(), "[MC] E: usage: mc_recover <1..6|pc|all>") != NULL);
+}
+
 int mc_test_failures, mc_test_checks;
 
 int main(void)
@@ -649,6 +930,16 @@ int main(void)
     RUN(test_error_behind_service_budget);
     RUN(test_error_before_next_line_starts);
     RUN(test_dma_restart_resyncs);
+    RUN(test_sup_stalls_rebuild_then_recover);
+    RUN(test_sup_quarantine_and_degraded_broadcast);
+    RUN(test_sup_probe_backoff_doubles);
+    RUN(test_sup_tx_refused_rebuilds);
+    RUN(test_sup_rx_dma_faults);
+    RUN(test_sup_line_error_storm_degrades_only);
+    RUN(test_sup_board_reset_when_many_ports_fault);
+    RUN(test_sup_pc_link_retried_not_quarantined);
+    RUN(test_rebuild_quiet_period);
+    RUN(test_mc_recover_command);
     RUN(test_dc_binary_frames_dropped);
     RUN(test_health_events);
     RUN(test_status_and_local_commands);

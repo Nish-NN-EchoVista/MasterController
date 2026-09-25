@@ -225,11 +225,17 @@ def counters_test(link):
         if bad:
             ok = False
             print(f"  FAIL {row}: nonzero {bad}")
+        if row != "summary":
+            h = re.search(r" health=(\S+)", rows[row])
+            if not h or h.group(1) != "OK":
+                ok = False
+                print(f"  FAIL {row}: health={h.group(1) if h else 'missing'}")
 
     check("summary", SUMMARY_ZERO, SUMMARY_ZERO)
     check("PC", PC_FIELDS, PC_ZERO)
     for k in range(1, NUM_DC + 1):
-        # purged is expected on DC1 only, from the stop test.
+        # purged is expected on DC1 only, from the stop test. Quarantines or
+        # recoveries during the run would also show up as health != OK.
         check(f"DC{k}", DC_FIELDS, DC_ZERO + (() if k == 1 else ("purged",)))
     if ok:
         print("  PASS complete report, no loss or error counters")

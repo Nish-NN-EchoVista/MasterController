@@ -12,10 +12,11 @@ import loopback_test as lt  # noqa: E402
 GOOD_ROWS = (
     ["[MC] status up=5s reset=X loop_max=0ms mc_lost=0 busy=0",
      "[MC] PC  P 921600 baud rx=1 lines=1 tx=1 q=0/256 overlong=0 binary=0 garbled=0 "
-     "uart_err_lines=0 fe=0 ne=0 overruns=0 stalls=0"]
+     "uart_err_lines=0 fe=0 ne=0 overruns=0 stalls=0 health=OK recoveries=0"]
     + [f"[MC] DC{k} D online @1,@2 last_rx=1ms rx=1 lines=1 up_drop=0 tx=1 q=0/96 "
        f"rejected=0 purged={28 if k == 1 else 0} overlong=0 binary=0 fe=0 ne=0 "
-       f"overruns=0 dma_restarts=0 stalls=0" for k in range(1, 7)]
+       f"overruns=0 dma_restarts=0 stalls=0 health=OK recoveries=0 quarantines=0"
+       for k in range(1, 7)]
 )
 
 
@@ -59,6 +60,11 @@ def main():
     ok &= expect("summary mc_lost", lt.counters_test(FakeLink(bad)), False)
     bad = [r.replace("purged=0", "purged=4") if r.startswith("[MC] DC2") else r for r in GOOD_ROWS]
     ok &= expect("DC2 purged (only DC1 allowed)", lt.counters_test(FakeLink(bad)), False)
+    bad = [r.replace("health=OK", "health=FAULTED(tx_stalls)") if r.startswith("[MC] DC4") else r
+           for r in GOOD_ROWS]
+    ok &= expect("DC4 faulted", lt.counters_test(FakeLink(bad)), False)
+    bad = [r.replace(" health=OK", "") if r.startswith("[MC] PC") else r for r in GOOD_ROWS]
+    ok &= expect("PC health missing", lt.counters_test(FakeLink(bad)), False)
     bad = [r.replace(" uart_err_lines=0", "") for r in GOOD_ROWS]
     ok &= expect("PC field missing", lt.counters_test(FakeLink(bad)), False)
 

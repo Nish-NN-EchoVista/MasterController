@@ -13,6 +13,9 @@
  *  - stop / cancel / @0 stop_all overtake queued traffic; unsent lines for
  *    the same boards are discarded first so nothing queued can restart them.
  *  - Every drop is counted, and reported on the PC link as an [MC] line.
+ *  - A port that stops carrying traffic is rebuilt, then quarantined and
+ *    retried with backoff if that does not help; broadcasts continue to the
+ *    healthy DataControllers and say which ones were skipped.
  */
 #include "mc_app.h"
 #include "mc_config.h"
@@ -63,7 +66,21 @@ typedef struct {
     uint32_t      line_first_ms;/* when the current line's first byte came   */
     uint8_t       taint_active;
     uint8_t       discont_armed;
+    uint8_t       resync_pending; /* input was lost: see resync_after_loss() */
+    uint32_t      resync_pos, resync_quiet_ms;
     uint8_t       seen, online, missing_reported;
+    /* Port health supervisor (PC link and DataController ports).           */
+    uint8_t       health;       /* H_OK .. H_FAULTED                         */
+    uint8_t       stall_strikes, restart_strikes, refusing, storm_reinit_done;
+    const char   *fault_reason;
+    uint32_t      tx_ok;        /* lines fully sent, never reset             */
+    uint32_t      strike_start_ms;
+    uint32_t      refused_since_ms;
+    uint32_t      restart_sup_seen, restart_fail_seen;
+    uint32_t      storm_start_ms, storm_err_base, storm_reinit_ms;
+    uint32_t      probation_until_ms, probation_tx_base;
+    uint32_t      next_probe_ms, backoff_ms;
+    uint32_t      recoveries, quarantines;
 } port_t;
 
 /* Rate-limited repeated event: the first occurrence is reported at once,
@@ -88,6 +105,9 @@ static uint32_t mc_lines_lost;         /* [MC] replies that found no room   */
 static uint8_t  had_drop;
 static volatile uint8_t status_requested;
 static ratelimit_t rl_busy, rl_pc_binary, rl_pc_overlong, rl_tainted;
+static ratelimit_t rl_partial, rl_faulted;
+static uint8_t  board_reset_pending, board_reset_declined;
+static uint32_t board_reset_at_ms;
 static uint32_t busy_total;
 
 static port_t *pc(void)            { return &ports[MC_PORT_PC]; }
@@ -152,6 +172,313 @@ static void note_drop(uint32_t now) { had_drop = 1; last_drop_ms = now; }
 
 static int clip(size_t len) { return (int)(len > 60u ? 60u : len); }
 
+/* ------------------------------------------------------ port health */
+
+/*
+ * Escalation ladder, per port (thresholds in mc_config.h):
+ *
+ *   OK / DEGRADED --hard fault--> rebuild the UART --> PROBATION
+ *   PROBATION --quiet for MC_SUP_PROBATION_MS, a line sent--> OK
+ *   PROBATION --any hard fault, or nothing sent--> FAULTED
+ *   FAULTED --probe timer--> rebuild --> PROBATION   (backoff 5 s .. 60 s)
+ *
+ * Hard faults are the port failing to carry traffic: repeated TX stalls,
+ * the driver refusing to transmit, receive DMA that keeps stopping or
+ * cannot restart. A storm of line errors is not one: the port still works,
+ * so it is marked DEGRADED and rebuilt at most once a minute, never
+ * quarantined.
+ *
+ * A FAULTED DataController port is quarantined: the platform stops
+ * touching it, its ordinary queued lines are discarded, commands addressed
+ * to its boards are refused and broadcasts go to the others. Stops for it
+ * stay queued and go out first if it recovers. The PC link is never
+ * quarantined (it is the only way in); it is simply retried with backoff.
+ */
+enum { H_OK = 0, H_DEGRADED, H_PROBATION, H_FAULTED };
+
+static const uint8_t CRLF[2] = { '\r', '\n' };
+
+static uint32_t line_errors(const mc_hw_stats_t *s)
+{
+    return s->framing + s->noise + s->parity;
+}
+
+/*
+ * Input was lost at an unknown point (DMA restart, ring overrun, UART
+ * rebuild). Bytes that follow at once may be the tail of a line whose start
+ * was lost, so the assembler discards up to the next line end. But if the
+ * port then stays quiet for longer than a maximum-length line takes on the
+ * wire, whatever arrives next cannot be such a tail (lines are sent as one
+ * burst) and is taken as a fresh line.
+ */
+static void resync_after_loss(unsigned port, uint32_t now)
+{
+    port_t *p = &ports[port];
+    uint32_t baud = mc_plat_port_baud(port);
+    mc_line_resync(&p->line);
+    p->resync_pending = 1;
+    p->resync_pos = p->rx_pos;
+    p->resync_quiet_ms = now + 1u +
+        (baud ? (uint32_t)(((uint64_t)MC_LINE_MAX + 2u) * 10000u / baud) : 0u);
+}
+
+static int is_dc_port(unsigned port) { return port >= 1u && port <= MC_NUM_DC; }
+static int dc_faulted(unsigned k)    { return dc(k)->health == H_FAULTED; }
+
+static const char *health_name(uint8_t h)
+{
+    static const char *n[] = { "OK", "DEGRADED", "PROBATION", "FAULTED" };
+    return h < 4u ? n[h] : "?";
+}
+
+static const char *port_label(unsigned port)
+{
+    static const char *n[MC_NUM_PORTS] = { "PC", "DC1", "DC2", "DC3", "DC4", "DC5", "DC6", "DBG" };
+    return port < MC_NUM_PORTS ? n[port] : "?";
+}
+
+static uint32_t min_u32(uint32_t a, uint32_t b) { return a < b ? a : b; }
+
+/* The line on the wire, if any, is lost by a rebuild or quarantine: part
+   of it may have gone out, so terminate it before anything else.          */
+static void drop_inflight(unsigned port)
+{
+    port_t *p = &ports[port];
+    if (mc_plat_tx_busy(port))
+        mc_plat_tx_abort(port);
+    if (mc_txq_head_locked(&p->txq)) {
+        mc_txq_pop(&p->txq);
+        (void)mc_txq_push_front(&p->txq, CRLF, 2u, 0);
+    }
+}
+
+static int rebuild_port(unsigned port, uint32_t now)
+{
+    port_t *p = &ports[port];
+    drop_inflight(port);
+    int ok = mc_plat_port_reinit(port);
+    resync_after_loss(port, now);       /* unread input was discarded */
+    /* A rebuild is not a DMA failure: re-baseline what the supervisor and
+       the receive path watch, so it is not counted against the port.     */
+    mc_hw_stats_t hw;
+    mc_plat_hw_stats(port, &hw);
+    p->restart_sup_seen  = hw.rx_restarts;
+    p->restart_fail_seen = hw.rx_restart_fails;
+    p->restart_seen      = hw.rx_restarts;
+    p->overrun_seen      = hw.rx_overruns;
+    p->stall_strikes = p->restart_strikes = 0;
+    p->refusing = 0;
+    p->strike_start_ms = now;
+    return ok;
+}
+
+static void start_probation(unsigned port, uint32_t now)
+{
+    port_t *p = &ports[port];
+    p->health = H_PROBATION;
+    p->probation_until_ms = now + MC_SUP_PROBATION_MS;
+    p->probation_tx_base = p->tx_ok;
+    /* Prove the transmitter works even when there is nothing to send. An
+       empty line is ignored by the DataController and the GUI alike.     */
+    if (mc_txq_count(&p->txq) == 0u)
+        (void)mc_txq_push(&p->txq, CRLF, 2u, 0, 0);
+}
+
+static void check_board_fault(uint32_t now)
+{
+    unsigned n = 0;
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        n += dc_faulted(k) ? 1u : 0u;
+    if (n < MC_SUP_BOARD_FAULT_DCS || board_reset_pending || board_reset_declined)
+        return;
+    if (strcmp(mc_plat_reset_cause(), "PORT_FAULTS") == 0) {
+        /* Already tried once this power cycle: stay up, keep probing. */
+        board_reset_declined = 1;
+        emit("E: %u DataController ports faulted again after a board reset; "
+             "not resetting again, ports stay quarantined and are retried", n);
+        return;
+    }
+    board_reset_pending = 1;
+    board_reset_at_ms = now + 100u;     /* let this message reach the PC */
+    emit("E: %u DataController ports faulted at once: resetting the board", n);
+}
+
+static void quarantine(unsigned port, const char *reason, uint32_t now)
+{
+    port_t *p = &ports[port];
+    p->health = H_FAULTED;
+    p->fault_reason = reason;
+    ++p->quarantines;
+    p->backoff_ms = p->backoff_ms ? min_u32(p->backoff_ms * 2u, MC_SUP_PROBE_MAX_MS)
+                                  : MC_SUP_PROBE_FIRST_MS;
+    p->next_probe_ms = now + p->backoff_ms;
+    note_drop(now);
+    if (!is_dc_port(port)) {
+        emit("E: PC link faulted (%s); retrying in %lu s", reason,
+             (unsigned long)(p->backoff_ms / 1000u));
+        return;
+    }
+    drop_inflight(port);
+    mc_plat_port_enable(port, 0);
+    uint16_t purged = mc_txq_purge(&p->txq, 0xFFu);   /* ordinary lines only */
+    p->c.purged += purged;
+    emit("E: DC%u faulted (%s): quarantined, %u queued line(s) discarded, "
+         "EVS2 @%u,@%u unavailable; retrying in %lu s", port, reason,
+         (unsigned)purged, 2u * port - 1u, 2u * port,
+         (unsigned long)(p->backoff_ms / 1000u));
+    check_board_fault(now);
+}
+
+/* The port failed to carry traffic. */
+static void hard_fault(unsigned port, const char *reason, uint32_t now)
+{
+    port_t *p = &ports[port];
+    if (p->health == H_FAULTED)
+        return;
+    if (p->health == H_PROBATION) {     /* the rebuild did not help */
+        quarantine(port, reason, now);
+        return;
+    }
+    p->fault_reason = reason;
+    emit("W: %s %s: rebuilding the UART", port_label(port), reason);
+    if (rebuild_port(port, now))
+        start_probation(port, now);
+    else
+        quarantine(port, "reinit_failed", now);
+}
+
+static void strike_window(port_t *p, uint32_t now)
+{
+    if (elapsed(now, p->strike_start_ms) >= MC_SUP_WINDOW_MS) {
+        p->strike_start_ms = now;
+        p->stall_strikes = p->restart_strikes = 0;
+    }
+}
+
+static void sup_tx_stalled(unsigned port, uint32_t now)
+{
+    port_t *p = &ports[port];
+    if (port == MC_PORT_DBG)
+        return;
+    strike_window(p, now);
+    if (++p->stall_strikes >= MC_SUP_STALL_STRIKES || p->health == H_PROBATION)
+        hard_fault(port, "tx_stalls", now);
+}
+
+static void sup_tx_refused(unsigned port, uint32_t now)
+{
+    port_t *p = &ports[port];
+    if (!p->refusing) {
+        p->refusing = 1;
+        p->refused_since_ms = now;
+    } else if (elapsed(now, p->refused_since_ms) >= MC_SUP_REFUSED_MS) {
+        hard_fault(port, "tx_refused", now);
+    }
+}
+
+static void supervise_port(unsigned port, uint32_t now)
+{
+    port_t *p = &ports[port];
+    mc_hw_stats_t hw;
+    mc_plat_hw_stats(port, &hw);
+
+    if (p->health == H_FAULTED) {
+        if ((int32_t)(now - p->next_probe_ms) < 0)
+            return;
+        emit("I: %s probing: rebuilding the UART", port_label(port));
+        if (rebuild_port(port, now)) {
+            mc_plat_port_enable(port, 1);
+            start_probation(port, now);
+        } else {
+            p->backoff_ms = min_u32(p->backoff_ms * 2u, MC_SUP_PROBE_MAX_MS);
+            p->next_probe_ms = now + p->backoff_ms;
+        }
+        return;
+    }
+
+    /* Receive DMA that keeps stopping, or cannot be restarted at all. */
+    strike_window(p, now);
+    if (hw.rx_restart_fails != p->restart_fail_seen) {
+        p->restart_fail_seen = hw.rx_restart_fails;
+        p->restart_sup_seen = hw.rx_restarts;
+        hard_fault(port, "rx_dma_failed", now);
+        return;
+    }
+    if (hw.rx_restarts != p->restart_sup_seen) {
+        uint32_t d = hw.rx_restarts - p->restart_sup_seen;
+        p->restart_sup_seen = hw.rx_restarts;
+        p->restart_strikes = (uint8_t)min_u32(p->restart_strikes + d, 255u);
+        if (p->restart_strikes >= MC_SUP_RESTART_STRIKES || p->health == H_PROBATION) {
+            hard_fault(port, "rx_dma_restarts", now);
+            return;
+        }
+    }
+
+    /* Line-error storm: degraded, never quarantined. */
+    if (elapsed(now, p->storm_start_ms) >= MC_SUP_STORM_WINDOW_MS) {
+        uint32_t errs = line_errors(&hw);
+        uint32_t d = errs - p->storm_err_base;
+        p->storm_err_base = errs;
+        p->storm_start_ms = now;
+        if (d >= MC_SUP_STORM_ERRORS && p->health == H_OK) {
+            p->health = H_DEGRADED;
+            p->fault_reason = "line_errors";
+            emit("W: %s degraded: %lu line errors in %lu ms (check wiring, ground, baud)",
+                 port_label(port), (unsigned long)d, (unsigned long)MC_SUP_STORM_WINDOW_MS);
+            if (!p->storm_reinit_done ||
+                elapsed(now, p->storm_reinit_ms) >= MC_SUP_STORM_REINIT_MS) {
+                p->storm_reinit_done = 1;
+                p->storm_reinit_ms = now;
+                if (!rebuild_port(port, now))
+                    quarantine(port, "reinit_failed", now);
+            }
+        } else if (d < MC_SUP_STORM_ERRORS && p->health == H_DEGRADED) {
+            p->health = H_OK;
+            emit("I: %s line errors subsided", port_label(port));
+        }
+    }
+
+    if (p->health == H_PROBATION && (int32_t)(now - p->probation_until_ms) >= 0) {
+        if (p->tx_ok != p->probation_tx_base) {
+            p->health = H_OK;
+            ++p->recoveries;
+            p->backoff_ms = 0;
+            emit("I: %s recovered (%s)", port_label(port), p->fault_reason);
+        } else {
+            quarantine(port, "no_tx_in_probation", now);
+        }
+    }
+}
+
+static void service_supervisor(uint32_t now)
+{
+    supervise_port(MC_PORT_PC, now);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        supervise_port(MC_PORT_DC(k), now);
+    if (board_reset_pending && (int32_t)(now - board_reset_at_ms) >= 0) {
+        board_reset_pending = 0;
+        board_reset_declined = 1;       /* in case the platform returns */
+        mc_plat_system_reset();
+    }
+}
+
+/* mc_recover <1..6|pc|all>: rebuild now (or probe a faulted port now). */
+static void manual_recover(unsigned port, uint32_t now)
+{
+    port_t *p = &ports[port];
+    if (p->health == H_FAULTED) {
+        p->next_probe_ms = now;
+        emit("I: %s: probe requested", port_label(port));
+        return;
+    }
+    emit("I: %s: rebuilding the UART on request", port_label(port));
+    p->fault_reason = "manual";
+    if (rebuild_port(port, now))
+        start_probation(port, now);
+    else
+        quarantine(port, "reinit_failed", now);
+}
+
 /* ---------------------------------------------------------- PC -> DCs */
 
 /* Admission threshold for ordinary traffic: the reserve is left for urgent
@@ -174,6 +501,9 @@ static void send_urgent(const mc_route_t *r, const uint8_t *out, uint16_t n,
             note_drop(now);
             emit("E: DC%u queue full, '%.*s' NOT sent to DC%u",
                  k, clip(r->payload_len), r->payload, k);
+        } else if (p->health == H_FAULTED) {
+            emit("W: DC%u is faulted: '%.*s' queued, sent first if it recovers",
+                 k, clip(r->payload_len), r->payload);
         }
     }
 }
@@ -182,8 +512,37 @@ static void send_normal(const mc_route_t *r, const uint8_t *out, uint16_t n,
                         unsigned first, unsigned last, uint32_t now,
                         const char *line, uint16_t len)
 {
-    /* All-or-nothing: check every target before committing to any. */
+    /* Faulted DataControllers: an addressed line is refused; a broadcast
+       goes to the healthy ones and says which were skipped.              */
+    char skipped[40];
+    size_t sl = 0;
+    unsigned available = 0;
+    skipped[0] = '\0';
     for (unsigned k = first; k <= last; ++k) {
+        if (!dc_faulted(k)) { ++available; continue; }
+        if (r->kind != MC_ROUTE_BROADCAST) {
+            ++dc(k)->c.rejected;
+            note_drop(now);
+            if (ratelimit_hit(&rl_faulted, now))
+                emit("E: DC%u is faulted (%s), not sent: %.*s", k,
+                     dc(k)->fault_reason, clip(len), line);
+            return;
+        }
+        int w = snprintf(skipped + sl, sizeof skipped - sl, "%sDC%u", sl ? " " : "", k);
+        if (w > 0 && (size_t)w < sizeof skipped - sl) sl += (size_t)w;
+    }
+    if (!available) {
+        note_drop(now);
+        if (ratelimit_hit(&rl_faulted, now))
+            emit("E: no DataController available (all faulted), not sent: %.*s",
+                 clip(len), line);
+        return;
+    }
+
+    /* All-or-nothing across the available targets: check every one before
+       committing to any.                                                 */
+    for (unsigned k = first; k <= last; ++k) {
+        if (dc_faulted(k)) continue;
         if (!has_room(dc(k))) {
             ++dc(k)->c.rejected;
             ++busy_total;
@@ -194,7 +553,11 @@ static void send_normal(const mc_route_t *r, const uint8_t *out, uint16_t n,
         }
     }
     for (unsigned k = first; k <= last; ++k)
-        (void)mc_txq_push(&dc(k)->txq, out, n, r->tag, 0);
+        if (!dc_faulted(k))
+            (void)mc_txq_push(&dc(k)->txq, out, n, r->tag, 0);
+    if (sl && ratelimit_hit(&rl_partial, now))
+        emit("W: sent to %u of %u DataControllers (faulted: %s): %.*s",
+             available, (unsigned)MC_NUM_DC, skipped, clip(len), line);
 }
 
 static void handle_local(const char *line, uint16_t len);
@@ -287,7 +650,8 @@ static void report_status(uint32_t now)
          (unsigned long)loop_max_ms, (unsigned long)mc_lines_lost,
          (unsigned long)busy_total);
     emit("PC  %s %lu baud rx=%lu lines=%lu tx=%lu q=%u/%u overlong=%lu binary=%lu "
-         "garbled=%lu uart_err_lines=%lu fe=%lu ne=%lu overruns=%lu stalls=%lu",
+         "garbled=%lu uart_err_lines=%lu fe=%lu ne=%lu overruns=%lu stalls=%lu "
+         "health=%s recoveries=%lu",
          mc_plat_port_name(MC_PORT_PC), (unsigned long)mc_plat_port_baud(MC_PORT_PC),
          (unsigned long)p->c.rx_bytes, (unsigned long)p->c.rx_lines,
          (unsigned long)p->c.tx_lines, (unsigned)mc_txq_count(&p->txq),
@@ -295,7 +659,8 @@ static void report_status(uint32_t now)
          (unsigned long)p->c.binary, (unsigned long)p->c.garbled,
          (unsigned long)p->c.tainted, (unsigned long)h.framing,
          (unsigned long)h.noise, (unsigned long)h.rx_overruns,
-         (unsigned long)p->c.stalls);
+         (unsigned long)p->c.stalls, health_name(p->health),
+         (unsigned long)p->recoveries);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k) {
         p = dc(k);
         hw_now(MC_PORT_DC(k), &h);
@@ -306,7 +671,8 @@ static void report_status(uint32_t now)
             snprintf(age, sizeof age, "never");
         emit("DC%u %s %s @%u,@%u last_rx=%s rx=%lu lines=%lu up_drop=%lu tx=%lu q=%u/%u "
              "rejected=%lu purged=%lu overlong=%lu binary=%lu fe=%lu ne=%lu "
-             "overruns=%lu dma_restarts=%lu stalls=%lu",
+             "overruns=%lu dma_restarts=%lu stalls=%lu health=%s%s%s%s "
+             "recoveries=%lu quarantines=%lu",
              k, mc_plat_port_name(MC_PORT_DC(k)), p->online ? "online" : "OFFLINE",
              2u * k - 1u, 2u * k, age,
              (unsigned long)p->c.rx_bytes, (unsigned long)p->c.rx_lines,
@@ -316,7 +682,11 @@ static void report_status(uint32_t now)
              (unsigned long)p->c.overlong, (unsigned long)p->c.binary,
              (unsigned long)h.framing, (unsigned long)h.noise,
              (unsigned long)h.rx_overruns, (unsigned long)h.rx_restarts,
-             (unsigned long)p->c.stalls);
+             (unsigned long)p->c.stalls, health_name(p->health),
+             p->health != H_OK ? "(" : "",
+             p->health != H_OK && p->fault_reason ? p->fault_reason : "",
+             p->health != H_OK ? ")" : "",
+             (unsigned long)p->recoveries, (unsigned long)p->quarantines);
     }
 }
 
@@ -353,11 +723,25 @@ static void handle_local(const char *line, uint16_t len)
     } else if (IS("mc_reset_stats")) {
         reset_stats(now);
         emit("statistics reset");
+    } else if (len >= 11u && memcmp(line, "mc_recover ", 11) == 0) {
+        const char *a = line + 11;
+        size_t al = len - 11u;
+        if (al == 3u && memcmp(a, "all", 3) == 0) {
+            manual_recover(MC_PORT_PC, now);
+            for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+                manual_recover(MC_PORT_DC(k), now);
+        } else if (al == 2u && memcmp(a, "pc", 2) == 0) {
+            manual_recover(MC_PORT_PC, now);
+        } else if (al == 1u && a[0] >= '1' && a[0] <= (char)('0' + MC_NUM_DC)) {
+            manual_recover(MC_PORT_DC((unsigned)(a[0] - '0')), now);
+        } else {
+            emit("E: usage: mc_recover <1..%u|pc|all>", (unsigned)MC_NUM_DC);
+        }
     } else if (IS("mc_help")) {
         emit("@1..@12 <cmd>: one EVS2 | #1..#6 <cmd>: one DataController | "
              "<cmd>: all six DataControllers");
         emit("stop, cancel, @0 stop_all: sent ahead of queued lines, which are discarded");
-        emit("mc_status mc_version mc_ping mc_reset_stats mc_help");
+        emit("mc_status mc_version mc_ping mc_reset_stats mc_recover <1..6|pc|all> mc_help");
     } else {
         emit("E: unknown MasterController command: %.*s", clip(len), line);
     }
@@ -379,30 +763,33 @@ static void service_tx(unsigned port, uint32_t now)
             /* Part of the aborted line may have gone out. Terminate it before
                anything else is sent, including queued stops, so it cannot
                merge into the next line.                                    */
-            (void)mc_txq_push_front(&p->txq, (const uint8_t *)"\r\n", 2u, 0);
+            (void)mc_txq_push_front(&p->txq, CRLF, 2u, 0);
+            sup_tx_stalled(port, now);
         }
         return;
     }
     if (mc_txq_head_locked(&p->txq)) {           /* previous line finished */
         const mc_slot_t *done = mc_txq_head(&p->txq);
         ++p->c.tx_lines;
+        ++p->tx_ok;
         p->c.tx_bytes += done->len;
         mc_txq_pop(&p->txq);
     }
     const mc_slot_t *next = mc_txq_head(&p->txq);
-    if (next && mc_plat_tx_start(port, next->data, next->len)) {
-        mc_txq_lock_head(&p->txq);
-        p->tx_start_ms = now;
-        /* Wire time of 10 bits per byte, plus a generous margin. */
-        uint32_t baud = mc_plat_port_baud(port);
-        p->tx_budget_ms = (baud ? (uint32_t)next->len * 10000u / baud : 0u) +
-                          MC_TX_STALL_MARGIN_MS;
+    if (!next)
+        return;
+    if (!mc_plat_tx_start(port, next->data, next->len)) {
+        if (port != MC_PORT_DBG)
+            sup_tx_refused(port, now);
+        return;
     }
-}
-
-static uint32_t line_errors(const mc_hw_stats_t *s)
-{
-    return s->framing + s->noise + s->parity;
+    p->refusing = 0;
+    mc_txq_lock_head(&p->txq);
+    p->tx_start_ms = now;
+    /* Wire time of 10 bits per byte, plus a generous margin. */
+    uint32_t baud = mc_plat_port_baud(port);
+    p->tx_budget_ms = (baud ? (uint32_t)next->len * 10000u / baud : 0u) +
+                      MC_TX_STALL_MARGIN_MS;
 }
 
 /* Signed distance between two stream positions (wrap-safe). */
@@ -471,7 +858,7 @@ static void service_rx(unsigned port, uint32_t now)
             int restarted = hw.rx_restarts != p->restart_seen;
             p->overrun_seen = hw.rx_overruns;
             p->restart_seen = hw.rx_restarts;
-            mc_line_resync(&p->line);
+            resync_after_loss(port, now);
             note_drop(now);
             if (!p->discont_armed || elapsed(now, p->discont_ms) >= MC_WARN_INTERVAL_MS) {
                 p->discont_armed = 1;
@@ -483,6 +870,17 @@ static void service_rx(unsigned port, uint32_t now)
         }
         if (n == 0u)
             break;
+
+        if (p->resync_pending) {
+            if (p->rx_pos != p->resync_pos) {
+                p->resync_pending = 0;          /* a tail is being discarded */
+            } else if ((int32_t)(now - p->resync_quiet_ms) >= 0) {
+                /* Quiet since the loss: these bytes start a fresh line. */
+                mc_line_init(&p->line);
+                p->boundary = p->rx_pos;
+                p->resync_pending = 0;
+            }
+        }
 
         total += n;
         p->c.rx_bytes += (uint32_t)n;
@@ -597,6 +995,9 @@ void mc_app_init(void)
     memset(&rl_pc_binary, 0, sizeof rl_pc_binary);
     memset(&rl_pc_overlong, 0, sizeof rl_pc_overlong);
     memset(&rl_tainted, 0, sizeof rl_tainted);
+    memset(&rl_partial, 0, sizeof rl_partial);
+    memset(&rl_faulted, 0, sizeof rl_faulted);
+    board_reset_pending = board_reset_declined = 0;
     boot_ms = mc_plat_now_ms();
     last_activity_ms = boot_ms;
     status_requested = 0;
@@ -609,6 +1010,11 @@ void mc_app_init(void)
         ports[i].err_seen = ports[i].err_reported = line_errors(&hw);
         ports[i].overrun_seen = hw.rx_overruns;
         ports[i].restart_seen = hw.rx_restarts;
+        ports[i].restart_sup_seen = hw.rx_restarts;
+        ports[i].restart_fail_seen = hw.rx_restart_fails;
+        ports[i].storm_err_base = line_errors(&hw);
+        ports[i].storm_start_ms = boot_ms;
+        ports[i].strike_start_ms = boot_ms;
     }
 
     emit("MasterController %s ready (reset: %s). %u DataControllers, EVS2 @1..@%u. "
@@ -631,8 +1037,10 @@ void mc_app_poll(void)
         report_status(now);
     }
 
+    service_supervisor(now);
+
     for (unsigned i = 0; i < MC_NUM_PORTS; ++i)
-        if (mc_plat_port_present(i))
+        if (mc_plat_port_present(i) && !(is_dc_port(i) && ports[i].health == H_FAULTED))
             service_tx(i, now);
 }
 
@@ -645,8 +1053,10 @@ int mc_app_fault_active(void)
         return 1;
     if (elapsed(now, boot_ms) < MC_STARTUP_GRACE_MS)
         return 0;
+    if (pc()->health != H_OK)
+        return 1;
     for (unsigned k = 1; k <= MC_NUM_DC; ++k)
-        if (!dc(k)->online)
+        if (!dc(k)->online || dc(k)->health != H_OK)
             return 1;
     return 0;
 }

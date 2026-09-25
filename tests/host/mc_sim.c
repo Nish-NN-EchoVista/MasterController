@@ -124,6 +124,10 @@ void mc_plat_hw_stats(unsigned port, mc_hw_stats_t *out)
 
 const char *mc_plat_reset_cause(void) { return "SIMULATOR"; }
 
+int  mc_plat_port_reinit(unsigned port) { S[port].busy = 0; return 1; }
+void mc_plat_port_enable(unsigned port, int enable) { (void)port; (void)enable; }
+void mc_plat_system_reset(void) { printf("system reset requested\n"); fflush(stdout); }
+
 /* ------------------------------------------------------------ plumbing */
 
 static void complete_tx(void)

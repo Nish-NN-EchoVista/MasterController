@@ -64,6 +64,28 @@
    aborted and counted as a stall.                                            */
 #define MC_TX_STALL_MARGIN_MS  100u
 
+/* ---- Port health supervisor -------------------------------------------- */
+/* Escalation ladder per port (see mc_app.c):
+     OK --hard fault--> reinit UART, PROBATION
+     PROBATION --no fault for MC_SUP_PROBATION_MS and TX proven--> OK
+     PROBATION --any hard fault--> FAULTED (quarantined; DC ports only)
+     FAULTED --probe timer--> reinit, PROBATION ... backoff doubles each time
+   Line-error storms make a port DEGRADED (reported, one reinit attempt) but
+   never quarantine it: a noisy port still carries traffic.                 */
+#define MC_SUP_WINDOW_MS          10000u  /* strike counting window          */
+#define MC_SUP_STALL_STRIKES      3u      /* TX stalls in the window         */
+#define MC_SUP_RESTART_STRIKES    3u      /* RX DMA restarts in the window   */
+#define MC_SUP_REFUSED_MS         50u     /* TX start refused continuously   */
+#define MC_SUP_PROBATION_MS       3000u
+#define MC_SUP_PROBE_FIRST_MS     5000u   /* first retry of a faulted port   */
+#define MC_SUP_PROBE_MAX_MS       60000u  /* backoff cap                     */
+#define MC_SUP_STORM_ERRORS       100u    /* line errors per storm window    */
+#define MC_SUP_STORM_WINDOW_MS    1000u
+#define MC_SUP_STORM_REINIT_MS    60000u  /* at most one storm reinit / min  */
+/* This many DataController ports faulted at once points at the board
+   itself (clock, power): reset it, but only once per power cycle.          */
+#define MC_SUP_BOARD_FAULT_DCS    3u
+
 /* ---- Baud rates (must match the .ioc) ---------------------------------- */
 #define MC_PC_BAUD             921600u
 #define MC_DC_BAUD             57600u

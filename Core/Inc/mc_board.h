@@ -20,7 +20,8 @@ typedef enum {
     MC_FAULT_BUSFAULT,
     MC_FAULT_USAGEFAULT,
     MC_FAULT_NMI,
-    MC_FAULT_DMA,          /* a receive DMA stream could not be restarted */
+    MC_FAULT_DMA,          /* a receive DMA stream could not be started   */
+    MC_FAULT_PORTS,        /* several ports faulted at once: board-wide    */
 } mc_fault_t;
 
 void mc_board_init(void);

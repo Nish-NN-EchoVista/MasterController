@@ -31,6 +31,7 @@ typedef struct {
     uint32_t tx_aborts;    /* stalled transmissions aborted                      */
     uint32_t rx_overruns;  /* main loop stalled long enough that the RX ring may
                               have been overwritten                              */
+    uint32_t rx_restart_fails; /* a DMA restart was attempted and failed         */
 } mc_hw_stats_t;
 
 uint32_t    mc_plat_now_ms(void);
@@ -47,5 +48,19 @@ void        mc_plat_tx_abort(unsigned port);
 void        mc_plat_hw_stats(unsigned port, mc_hw_stats_t *out);
 
 const char *mc_plat_reset_cause(void);
+
+/* ---- Recovery hooks used by the port health supervisor (mc_app.c) ---- */
+
+/* Rebuild one port from scratch: stop it, de-initialise the UART (clock,
+   pins, DMA, IRQ), pulse its RCC reset, re-initialise it with the original
+   settings and restart reception. Any transmission in progress is lost and
+   unread input is discarded. Returns 1 if the port came back up.          */
+int         mc_plat_port_reinit(unsigned port);
+/* A disabled (quarantined) port is left alone by the platform: no automatic
+   receive restarts. Ports start enabled.                                  */
+void        mc_plat_port_enable(unsigned port, int enable);
+/* Reset the whole board, recording why (reported at the next boot as
+   "PORT_FAULTS"). Never returns on hardware.                              */
+void        mc_plat_system_reset(void);
 
 #endif /* MC_PLATFORM_H */

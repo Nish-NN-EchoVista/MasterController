@@ -126,8 +126,8 @@ Lines produced by the MasterController itself start with `[MC] `
 - **Nothing blocks.** Reception is DMA into ring buffers that never stop,
   even on framing or noise errors.
   - A stopped DMA stream is restarted, including re-initialising its
-    handle if needed. If it can't be restarted after 50 tries, the board
-    resets and reports `DMA_FAILURE`.
+    handle if needed. If that keeps happening, or fails, the port
+    supervisor takes over (see [Self-healing ports](#self-healing-ports)).
   - All routing runs in the main loop. The watchdog resets the board if the
     main loop ever stalls for about 1 s, and the next boot reports why.
   - Each DataController ring holds more than the watchdog timeout of input.
@@ -140,6 +140,54 @@ Lines produced by the MasterController itself start with `[MC] `
   text only. Frames from either direction are discarded and counted, and
   a `0x00` byte is never sent to a DataController. See
   [docs/binary-protocol.md](docs/binary-protocol.md) for the plan.
+
+### Self-healing ports
+
+Each UART port (the laptop link and all six DataController links) has a
+health supervisor. A **hard fault** means the port stopped carrying
+traffic:
+- 3 transmit stalls within 10 s;
+- the driver refusing to transmit for 50 ms;
+- 3 receive-DMA restarts within 10 s, or one restart that fails.
+
+Recovery climbs a ladder, one step at a time:
+
+| State | How it gets there | What happens |
+|---|---|---|
+| **OK** | Normal operation | — |
+| **PROBATION** | A hard fault on a healthy port | The UART is **rebuilt from scratch**: de-initialised, its RCC reset pulsed, then re-initialised with its original settings and reception restarted. It then has 3 s to prove itself by sending a line (an empty line is sent if nothing is queued). |
+| **OK again** | Probation passes | `[MC] I: DCk recovered (…)` |
+| **FAULTED** | Any hard fault during probation, or nothing sent | The port is **quarantined** (see below). The laptop is told which boards are unavailable. |
+| **PROBATION** | Probe timer fires on a faulted port | The port is rebuilt and tried again. The retry delay doubles each time: 5 s, 10 s, 20 s … up to 60 s. |
+| **DEGRADED** | 100+ line errors in 1 s | Reported, and the port is rebuilt at most once a minute. It is **never quarantined**, because a noisy port still carries traffic. It goes back to OK when the errors stop. |
+
+While a DataController port is quarantined:
+- The MC stops driving it.
+- Its unsent ordinary lines are discarded and reported.
+- Commands addressed to its boards are refused:
+  `[MC] E: DC3 is faulted (tx_stalls), not sent: …`.
+- **Broadcasts still go to the healthy DataControllers**, and the laptop is
+  told which were skipped:
+  `[MC] W: sent to 5 of 6 DataControllers (faulted: DC3): start_defog`.
+  All-or-nothing still applies across the healthy ones.
+- Stops sent to it stay queued. They go out first, ahead of anything else,
+  if it recovers.
+
+A few more rules:
+- **The laptop link is never quarantined**, since it is the only way in.
+  It is rebuilt and retried the same way, but keeps routing.
+- **Lines cut by a rebuild are not forwarded.** Bytes arriving right after
+  a rebuild may be the tail of a line that was cut off, so they are
+  discarded up to the next line ending. A line that starts after a quiet
+  period (one full-length line time: about 6 ms on the laptop link, 89 ms
+  on a DC link) is kept.
+- **Three or more DataController ports faulted at once** points at the
+  board itself, such as its clock or power. The MC resets once, and the
+  next boot reports `reset: PORT_FAULTS`. If the same thing happens again
+  before a power cycle, it stays up and keeps probing instead of looping
+  through resets.
+- **Manual recovery:** `mc_recover <1..6|pc|all>` rebuilds a port on
+  demand, or makes a faulted port probe immediately.
 
 ### Capacity
 
@@ -160,8 +208,9 @@ never happen in practice.
 | `mc_help` | Command summary |
 | `mc_ping` | `[MC] pong` (lets the GUI detect a MasterController) |
 | `mc_version` | Firmware version and build time |
-| `mc_status` | Uptime, reset cause, worst main-loop time, then one line per port: online/offline, time since last byte, bytes/lines, queue depth, drops, framing/noise errors, DMA restarts, TX stalls |
+| `mc_status` | Uptime, reset cause, worst main-loop time, then one line per port: online/offline, time since last byte, bytes/lines, queue depth, drops, framing/noise errors, DMA restarts, TX stalls, `health=` state (with the fault reason), recoveries and quarantines |
 | `mc_reset_stats` | Zero all counters |
+| `mc_recover <1..6\|pc\|all>` | Rebuild a port now, or probe a faulted port now |
 
 Unsolicited `[MC]` lines:
 - A boot banner that includes the reset cause (`POWER_ON`, `WATCHDOG`,
@@ -181,7 +230,7 @@ link.
 |---|---|
 | Green LD1 | 1 Hz heartbeat. The main loop is running. |
 | Yellow LD2 | Flickers with routed traffic |
-| Red LD3 | A DataController is offline, or something was dropped in the last 2 s |
+| Red LD3 | A DataController is offline, any port is not healthy, or something was dropped in the last 2 s |
 | Blue button B1 | Prints a full `mc_status` report |
 
 ## Building

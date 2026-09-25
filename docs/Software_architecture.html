@@ -356,10 +356,11 @@
       <li><a href="#queues"><span class="n">08</span>Whole-line queues</a></li>
       <li><a href="#states"><span class="n">09</span>State machines</a></li>
       <li><a href="#integrity"><span class="n">10</span>Integrity &amp; recovery</a></li>
-      <li><a href="#observe"><span class="n">11</span>Observability</a></li>
-      <li><a href="#verify"><span class="n">12</span>Verification</a></li>
-      <li><a href="#config"><span class="n">13</span>Configuration</a></li>
-      <li><a href="#files"><span class="n">14</span>File map</a></li>
+      <li><a href="#healing"><span class="n">11</span>Self-healing ports</a></li>
+      <li><a href="#observe"><span class="n">12</span>Observability</a></li>
+      <li><a href="#verify"><span class="n">13</span>Verification</a></li>
+      <li><a href="#config"><span class="n">14</span>Configuration</a></li>
+      <li><a href="#files"><span class="n">15</span>File map</a></li>
     </ol>
   </nav>
 
@@ -373,7 +374,8 @@
         <li><b>7</b> routed UARTs + ST-LINK VCP</li>
         <li><b>921 600</b> baud up · <b>57 600</b> baud down</li>
         <li><b>@1…@12</b> EVS2 addressing</li>
-        <li><b>346</b> host test checks</li>
+        <li><b>self-healing</b> UART ports</li>
+        <li><b>420</b> host test checks</li>
         <li>v<b>1.0.0</b> · main</li>
       </ul>
     </header>
@@ -500,7 +502,7 @@
         </div>
         <div class="layer">
           <div><h4>Platform contract</h4><div class="where">mc_platform.h</div></div>
-          <div><p>About ten functions: <code>rx_read</code>, <code>rx_pending</code>, <code>tx_start</code>, <code>tx_busy</code>, <code>tx_abort</code>, <code>hw_stats</code>, <code>now_ms</code>. The same contract has three implementations: the STM32 board, a scripted fake for unit tests, and a TCP simulator.</p>
+          <div><p>About a dozen functions. Data: <code>rx_read</code>, <code>rx_pending</code>, <code>tx_start</code>, <code>tx_busy</code>, <code>tx_abort</code>, <code>hw_stats</code>, <code>now_ms</code>. Recovery hooks: <code>port_reinit</code>, <code>port_enable</code>, <code>system_reset</code>. The same contract has three implementations: the STM32 board, a scripted fake for unit tests (which can inject any fault), and a TCP simulator.</p>
           <div class="chips"><span class="chip">mc_platform.c</span><span class="chip">fake_platform.c</span><span class="chip">mc_sim.c</span></div></div>
         </div>
         <div class="layer hl">
@@ -508,7 +510,7 @@
           <div><p>Ties everything together:</p>
           <ul class="plain">
             <li>receive integrity, routing, admission (all-or-nothing and urgent), and transmit servicing with stall recovery;</li>
-            <li>per-DataController health, the <code>mc_*</code> commands, and rate-limited <code>[MC]</code> reporting.</li>
+            <li>the port health supervisor (rebuild, quarantine, probe with backoff), per-DataController online state, the <code>mc_*</code> commands, and rate-limited <code>[MC]</code> reporting.</li>
           </ul></div>
         </div>
         <div class="layer core">
@@ -530,8 +532,8 @@
             <li>Measure the time since the last pass. A gap long enough to fill a receive ring is recorded as a possible overrun.</li>
             <li>For every port, count and clear the framing, noise and parity flags, and restart the RX DMA if its stream or <code>DMAR</code> bit has stopped.</li>
             <li><code>mc_app_poll()</code>: receive and route laptop lines, then receive and retag DataController lines (at most 4 KB per port per pass).</li>
-            <li>Health checks: DataController online/offline changes, congestion reports, line-error warnings, and a pending status request.</li>
-            <li>Transmit for each of the 8 ports: retire a finished line, abort a stalled one, and start the next whole line.</li>
+            <li>Health checks: DataController online/offline changes, congestion reports, line-error warnings, a pending status request, and the port supervisor (rebuild, quarantine, probe).</li>
+            <li>Transmit for each port that isn't quarantined: retire a finished line, abort a stalled one, and start the next whole line.</li>
             <li>Update the LEDs, refresh the watchdog (only here), and record the worst loop time.</li>
           </ol>
         </div>
@@ -631,7 +633,7 @@
 
       <h3>Admission, in two rules</h3>
       <div class="grid2">
-        <div class="card"><span class="k">Ordinary lines</span><h4>All-or-nothing</h4><p>Every target queue is checked before any copy is made. A broadcast needs space in all six, and each queue always keeps back its 4 reserved slots. If any one is full, no DataController receives the line, and the laptop gets one clear <code>busy</code> reply.</p></div>
+        <div class="card"><span class="k">Ordinary lines</span><h4>All-or-nothing</h4><p>Every target queue is checked before any copy is made. A broadcast needs space in every <em>healthy</em> DataController, and each queue always keeps back its 4 reserved slots. If any one is full, none of them receives the line, and the laptop gets one clear <code>busy</code> reply. Quarantined DataControllers are skipped and named in a warning (see <a href="#healing">section 11</a>).</p></div>
         <div class="card"><span class="k">stop · cancel · @0 stop_all</span><h4>Purge, then jump the queue</h4><p>Unsent ordinary lines for the same boards are discarded and the count is reported. The stop is then placed right behind the line currently on the wire, and behind any earlier stops. It can use the reserved slots.</p></div>
       </div>
     </section>
@@ -943,8 +945,11 @@
             <tr><td>Binary COBS frame</td><td>A 0x00 byte</td><td>Frame discarded; 0x00 is never sent downstream</td><td><span class="pill crit">E: binary … not supported</span></td></tr>
             <tr><td>Line longer than 512</td><td>Line builder</td><td>Discarded up to its line ending</td><td><span class="pill crit">E: longer than 512</span></td></tr>
             <tr><td>Main-loop stall</td><td>Gap between passes ≥ ¾ of the time to fill a ring</td><td>Line builder resync on that port</td><td><span class="pill warn">W: input lost</span></td></tr>
-            <tr><td>RX DMA stopped</td><td>Stream <code>EN</code> or <code>CR3.DMAR</code> cleared</td><td>Abort and restart; re-initialise the handle if needed; resync. After 50 failed tries, reset the board.</td><td><span class="pill warn">W: input lost</span> <span class="pill crit">DMA_FAILURE</span></td></tr>
-            <tr><td>TX stall</td><td>Line still sending after its wire time + 100 ms</td><td>Abort, then send a CRLF ahead of everything</td><td><code>stalls=</code></td></tr>
+            <tr><td>RX DMA stopped</td><td>Stream <code>EN</code> or <code>CR3.DMAR</code> cleared</td><td>Abort and restart; re-initialise the handle if needed; resync. Repeated or failed restarts escalate to the supervisor.</td><td><span class="pill warn">W: input lost</span></td></tr>
+            <tr><td>TX stall</td><td>Line still sending after its wire time + 100 ms</td><td>Abort, then send a CRLF ahead of everything. 3 stalls in 10 s escalate to the supervisor.</td><td><code>stalls=</code></td></tr>
+            <tr><td>Driver won't transmit</td><td>TX start refused for 50 ms</td><td>Supervisor: rebuild the UART</td><td><span class="pill warn">W: tx_refused</span></td></tr>
+            <tr><td>Port won't recover</td><td>A hard fault during probation</td><td>Quarantine the port; broadcasts go to the rest; retry with backoff</td><td><span class="pill crit">E: DCk faulted</span></td></tr>
+            <tr><td>Board-wide fault</td><td>3+ DataController ports faulted at once</td><td>Reset once per power cycle, then stay up and keep probing</td><td><span class="pill info">reset: PORT_FAULTS</span></td></tr>
             <tr><td>Queue full</td><td>Admission check</td><td>Refuse the whole line (and a broadcast for all six)</td><td><span class="pill crit">E: busy</span></td></tr>
             <tr><td>Main loop hung</td><td>IWDG, ≈1 s</td><td>Hardware reset</td><td><span class="pill info">reset: WATCHDOG</span></td></tr>
             <tr><td>CPU fault / HAL error</td><td>Fault vectors, <code>Error_Handler</code></td><td>Write reason to <code>TAMP-&gt;BKP0R</code>, then reset</td><td><span class="pill info">reset: HARDFAULT …</span></td></tr>
@@ -955,40 +960,119 @@
       <div class="note"><b>Design decision:</b> the ST HAL's interrupt handler aborts DMA reception on the first framing error, so it's never given UART error interrupts. The CubeMX setting "DMA disable on RX error" is also turned off at runtime (<code>CR3.DDRE</code> cleared, and <code>OVRDIS</code> set so an overrun can't block reception). Reception keeps running, and errors become counters instead of outages.</div>
     </section>
 
+
     <!-- ===================================================== 11 -->
+    <section id="healing">
+      <div class="sec-head"><span class="sec-no">11</span><h2>Self-healing ports</h2></div>
+      <p class="sec-intro">Section 10 keeps a port's <em>data</em> safe. The supervisor keeps the port itself <em>working</em>. Every UART (the laptop link and all six DataController links) has its own health state. A port that stops carrying traffic is rebuilt, then quarantined and retried if rebuilding doesn't help, so one broken cable can never take the other DataControllers down with it.</p>
+
+      <figure>
+        <div class="diagram w-760">
+          <svg viewBox="0 0 800 300" role="img" aria-labelledby="heal-t">
+            <title id="heal-t">Port health states: OK, PROBATION, FAULTED, DEGRADED</title>
+            <defs>
+              <marker id="ahh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8B97AD"/></marker>
+              <marker id="ahr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#EF6B73"/></marker>
+            </defs>
+            <rect class="bok" x="40"  y="70"  width="150" height="56" rx="10"/><text class="th" x="115" y="103" text-anchor="middle">OK</text>
+            <rect class="ba"  x="320" y="70"  width="160" height="56" rx="10"/><text class="th" x="400" y="97" text-anchor="middle">PROBATION</text><text class="tm" x="400" y="115" text-anchor="middle">rebuilt · 3 s trial</text>
+            <rect class="bx"  x="610" y="70"  width="150" height="56" rx="10"/><text class="th" x="685" y="97" text-anchor="middle">FAULTED</text><text class="tm" x="685" y="115" text-anchor="middle">quarantined</text>
+            <rect class="bw"  x="40"  y="210" width="150" height="56" rx="10"/><text class="th" x="115" y="237" text-anchor="middle">DEGRADED</text><text class="tm" x="115" y="255" text-anchor="middle">still in service</text>
+            <rect class="b2"  x="610" y="210" width="150" height="56" rx="10"/><text class="th" x="685" y="237" text-anchor="middle">BOARD RESET</text><text class="tm" x="685" y="255" text-anchor="middle">once per power cycle</text>
+
+            <line class="ln" x1="190" y1="88" x2="318" y2="88" marker-end="url(#ahh)"/>
+            <text class="t2" x="254" y="62" text-anchor="middle">hard fault</text>
+            <text class="ta" x="254" y="78" text-anchor="middle">rebuild UART</text>
+            <line class="ln" x1="320" y1="112" x2="192" y2="112" marker-end="url(#ahh)"/>
+            <text class="tok" x="256" y="132" text-anchor="middle">recovered</text>
+            <text class="tm" x="256" y="147" text-anchor="middle">3 s clean, line sent</text>
+
+            <line class="lx" x1="480" y1="88" x2="608" y2="88" marker-end="url(#ahr)"/>
+            <text class="t2" x="544" y="62" text-anchor="middle">fault again</text>
+            <text class="tx" x="544" y="78" text-anchor="middle">quarantine</text>
+            <line class="ln" x1="610" y1="112" x2="482" y2="112" marker-end="url(#ahh)"/>
+            <text class="t2" x="546" y="132" text-anchor="middle">probe: rebuild</text>
+            <text class="tm" x="546" y="147" text-anchor="middle">5 → 60 s backoff</text>
+
+            <line class="ln" x1="90" y1="126" x2="90" y2="208" marker-end="url(#ahh)"/>
+            <text class="tw" x="100" y="163">≥ 100 line errors / s</text>
+            <line class="ln" x1="150" y1="210" x2="150" y2="128" marker-end="url(#ahh)"/>
+            <text class="t2" x="160" y="190">errors subside</text>
+            <line class="ln" x1="190" y1="226" x2="358" y2="128" marker-end="url(#ahh)"/>
+            <text class="t2" x="318" y="200" text-anchor="middle">hard fault</text>
+
+            <line class="lx" x1="685" y1="126" x2="685" y2="208" marker-end="url(#ahr)"/>
+            <text class="tx" x="695" y="163">≥ 3 DC ports</text>
+            <text class="tx" x="695" y="179">faulted at once</text>
+          </svg>
+        </div>
+        <figcaption><b>Hard faults</b> mean the port stopped carrying traffic: 3 TX stalls in 10 s, the driver refusing to transmit for 50 ms, or receive DMA that keeps stopping (3 restarts in 10 s) or fails to restart. A <b>line-error storm</b> is different. The port still carries traffic, so it is marked DEGRADED and rebuilt at most once a minute, but never quarantined.</figcaption>
+      </figure>
+
+      <div class="grid2">
+        <div class="card"><span class="k">Step 1 · rebuild</span><h4>Reset just that UART</h4><p>The HAL de-init tears down the clock, pins, DMA stream and IRQ. The RCC reset line of that one peripheral is pulsed, then the CubeMX init runs again from the saved settings, followed by the same FIFO, CR3 and RX-DMA setup as at boot. The other ports never notice.</p></div>
+        <div class="card"><span class="k">Step 2 · probation</span><h4>Prove it works</h4><p>For 3 s the port must stay fault-free and send at least one line. If nothing is queued, an empty line is sent: the DataController and GUI both ignore it. Any hard fault during probation means the rebuild didn't help.</p></div>
+        <div class="card"><span class="k">Step 3 · quarantine</span><h4>Isolate and retry</h4><p>The platform stops driving the port, its unsent ordinary lines are discarded, and its two EVS2 boards are reported unavailable. It is probed again after 5 s, then 10, 20, 40 and 60 s. Each probe is a full rebuild followed by probation.</p></div>
+        <div class="card"><span class="k">Last resort</span><h4>Board-wide faults</h4><p>Three or more DataController ports failing together points at the board itself, such as its clock or power. The MC resets once and reports <code>PORT_FAULTS</code> at the next boot. If it happens again before a power cycle, it stays up and keeps probing rather than looping through resets.</p></div>
+      </div>
+
+      <h3>Degraded broadcast</h3>
+      <p>While a DataController is quarantined, broadcasts carry on to the healthy ones. All-or-nothing still applies across those, and the laptop is told exactly which DataControllers were skipped. Commands addressed to a quarantined DataController's boards are refused with a reply. Stops are the exception: they stay queued and go out first if it recovers.</p>
+      <div class="q" aria-label="A broadcast with DC3 quarantined">
+        <div class="slot ord"><small>DC1 · sent</small>start_defog</div>
+        <div class="slot ord"><small>DC2 · sent</small>start_defog</div>
+        <div class="slot gone"><small>DC3 · faulted, skipped</small>start_defog</div>
+        <div class="slot ord"><small>DC4 · sent</small>start_defog</div>
+        <div class="slot ord"><small>DC5 · sent</small>start_defog</div>
+        <div class="slot ord"><small>DC6 · sent</small>start_defog</div>
+      </div>
+<pre class="term"><span class="p">&gt;</span> <span class="a">start_defog</span>
+<span class="w">[MC] W: sent to 5 of 6 DataControllers (faulted: DC3): start_defog</span>
+<span class="p">&gt;</span> <span class="a">@5 get volt</span>
+<span class="x">[MC] E: DC3 is faulted (tx_stalls), not sent: @5 get volt</span>
+<span class="p">&gt;</span> <span class="a">@6 stop</span>
+<span class="w">[MC] W: DC3 is faulted: 'stop' queued, sent first if it recovers</span>
+<span class="c">[MC] I: DC3 probing: rebuilding the UART</span>
+<span class="c">[MC] I: DC3 recovered (tx_stalls)</span></pre>
+
+      <div class="note"><b>Lines cut by a rebuild are never forwarded.</b> A rebuild discards unread input, so the next bytes may be the tail of a line that was cut off. The line builder discards those up to the next line ending. A line whose first byte arrives after one full line-time of quiet (about 6 ms on the laptop link, 89 ms on a DataController link) cannot be such a tail, so it is kept. That means a command sent after a recovery is never lost.</div>
+      <p><code>mc_recover &lt;1..6|pc|all&gt;</code> rebuilds a port on demand, or makes a faulted port probe immediately. The laptop link is never quarantined, since it is the only way in: it is rebuilt and retried in the same way, but keeps routing.</p>
+    </section>
+
+    <!-- ===================================================== 12 -->
     <section id="observe">
-      <div class="sec-head"><span class="sec-no">11</span><h2>Observability</h2></div>
+      <div class="sec-head"><span class="sec-no">12</span><h2>Observability</h2></div>
       <p class="sec-intro">Everything the MasterController says begins with <code>[MC] </code>, so the GUI can log it or ignore it. The same lines are mirrored to the ST-LINK USB serial port at 115 200 baud, so they can be watched without touching the laptop link.</p>
 <pre class="term"><span class="p">&gt;</span> <span class="a">mc_status</span>
 <span class="c">[MC] status up=412s reset=POWER_ON loop_max=0ms mc_lost=0 busy=0</span>
-<span class="c">[MC] PC  USART2 PA2/PA3 921600 baud rx=18344 lines=611 tx=5210 q=0/256 overlong=0 binary=0 garbled=0 uart_err_lines=0 fe=0 ne=0 overruns=0 stalls=0</span>
-<span class="c">[MC] DC1 USART10 PE3/PE2 online @1,@2 last_rx=212ms rx=40211 lines=1733 up_drop=0 tx=94 q=0/96 rejected=0 purged=0 overlong=0 binary=0 fe=0 ne=0 overruns=0 dma_restarts=0 stalls=0</span>
+<span class="c">[MC] PC  USART2 PA2/PA3 921600 baud rx=18344 lines=611 tx=5210 q=0/256 overlong=0 binary=0 garbled=0 uart_err_lines=0 fe=0 ne=0 overruns=0 stalls=0 health=OK recoveries=0</span>
+<span class="c">[MC] DC1 USART10 PE3/PE2 online @1,@2 last_rx=212ms rx=40211 lines=1733 up_drop=0 tx=94 q=0/96 rejected=0 purged=0 overlong=0 binary=0 fe=0 ne=0 overruns=0 dma_restarts=0 stalls=0 health=OK recoveries=0 quarantines=0</span>
 <span class="p">…</span>
 <span class="w">[MC] W: DC4 offline: silent for 3004 ms</span>
 <span class="w">[MC] W: 'stop' discarded 3 queued line(s) for DC2</span>
 <span class="x">[MC] E: busy (DC3 queue full), not sent: start_sweep</span></pre>
       <p class="stack-note">Sample output for illustration, not captured from a board.</p>
       <div class="grid2">
-        <div class="card"><span class="k">Commands</span><h4><code>mc_status</code> · <code>mc_ping</code> · <code>mc_version</code> · <code>mc_reset_stats</code> · <code>mc_help</code></h4><p>A status report has one summary line and one line per port. Every counter is listed so the commissioning script can require each one to be zero.</p></div>
-        <div class="card"><span class="k">On the board</span><h4>LEDs &amp; button</h4><p><span class="pill ok">green</span> 1 Hz heartbeat · <span class="pill warn">yellow</span> traffic · <span class="pill crit">red</span> a DataController offline or a drop in the last 2 s. The blue button prints a full <code>mc_status</code> report.</p></div>
+        <div class="card"><span class="k">Commands</span><h4><code>mc_status</code> · <code>mc_ping</code> · <code>mc_version</code> · <code>mc_reset_stats</code> · <code>mc_recover</code> · <code>mc_help</code></h4><p>A status report has one summary line and one line per port. Every counter and each port's <code>health=</code> state are listed, so the commissioning script can require each counter to be zero and every port to be OK.</p></div>
+        <div class="card"><span class="k">On the board</span><h4>LEDs &amp; button</h4><p><span class="pill ok">green</span> 1 Hz heartbeat · <span class="pill warn">yellow</span> traffic · <span class="pill crit">red</span> a DataController offline, a port not healthy, or a drop in the last 2 s. The blue button prints a full <code>mc_status</code> report.</p></div>
       </div>
     </section>
 
     <!-- ===================================================== 12 -->
     <section id="verify">
-      <div class="sec-head"><span class="sec-no">12</span><h2>Verification</h2></div>
+      <div class="sec-head"><span class="sec-no">13</span><h2>Verification</h2></div>
       <p class="sec-intro">Because the platform contract is so small, the same application code runs in three places: on the board, against a scripted fake, and inside a real-time simulator.</p>
       <div class="grid3">
-        <div class="card"><span class="k">tests/host · C</span><h4>Unit &amp; app tests</h4><p>346 checks. <code>test_core</code> covers the queue, line builder and router. <code>test_app</code> covers the full application against the fake, with injected stalls, UART errors, DMA restarts, overruns and congestion. Built with <code>-Werror -Wconversion</code>.</p></div>
+        <div class="card"><span class="k">tests/host · C</span><h4>Unit &amp; app tests</h4><p>420 checks. <code>test_core</code> covers the queue, line builder and router. <code>test_app</code> covers the full application against the fake, with injected stalls, refusals, UART errors, DMA restarts and failures, overruns and congestion. It walks every step of the recovery ladder, including quarantine, backoff, recovery and the board reset. Built with <code>-Werror -Wconversion</code>.</p></div>
         <div class="card"><span class="k">tests/host · mc_sim</span><h4>Simulator</h4><p>The real core behind a TCP socket, with DataController ports looped back and wire time emulated at each port's baud rate. It speaks to pyserial as <code>socket://localhost:5555</code>.</p></div>
-        <div class="card"><span class="k">tools · Python</span><h4>Loopback commissioning</h4><p>With TX-to-RX jumpers on each DataController port, it checks every route, broadcast atomicity, burst ordering and stop behavior, and requires a complete status report with every loss counter at zero. A self-test confirms it fails when the report is bad.</p></div>
+        <div class="card"><span class="k">tools · Python</span><h4>Loopback commissioning</h4><p>With TX-to-RX jumpers on each DataController port, it checks every route, broadcast atomicity, burst ordering and stop behavior, and requires a complete status report with every loss counter at zero. It also requires every port to report <code>health=OK</code>. A self-test with 15 cases confirms it fails when the report is bad.</p></div>
       </div>
       <p>The firmware builds headless in STM32CubeIDE with 0 errors and 0 warnings in both Debug and Release. The <code>mc_*.c</code> sources also compile cleanly with <code>-Wextra -Wconversion -Wshadow -Wformat=2</code> for Cortex-M7. Hardware still needs validating before relying on it: electrical checks, clock accuracy, real UART and DMA faults, and the attached F401 and EVS2 boards.</p>
     </section>
 
     <!-- ===================================================== 13 -->
     <section id="config">
-      <div class="sec-head"><span class="sec-no">13</span><h2>Configuration</h2></div>
+      <div class="sec-head"><span class="sec-no">14</span><h2>Configuration</h2></div>
       <p class="sec-intro">Every tunable is in <code>Core/Inc/mc_config.h</code>, except the ring sizes, which live next to the DMA code in <code>mc_platform.c</code>.</p>
       <div class="tbl">
         <table>
@@ -1006,7 +1090,12 @@
             <tr><td><code>MC_TAINT_GRACE_MS</code></td><td class="num">5</td><td>Window in which a line starting at the error point is also discarded</td></tr>
             <tr><td><code>MC_TX_STALL_MARGIN_MS</code></td><td class="num">100</td><td>Time allowed beyond a line's wire time before it counts as stalled</td></tr>
             <tr><td><code>PC_RX_BYTES</code> / <code>DC_RX_BYTES</code></td><td class="num">49 152 / 8 192</td><td>DMA ring sizes (DMA counter limit: 65 535)</td></tr>
-            <tr><td><code>DMA_RESTART_LIMIT</code></td><td class="num">50</td><td>Consecutive failed restarts before the board resets itself</td></tr>
+            <tr><td><code>MC_SUP_STALL_STRIKES</code> / <code>MC_SUP_RESTART_STRIKES</code></td><td class="num">3 / 3</td><td>Stalls or DMA restarts within <code>MC_SUP_WINDOW_MS</code> (10 s) that count as a hard fault</td></tr>
+            <tr><td><code>MC_SUP_REFUSED_MS</code></td><td class="num">50</td><td>TX start refused this long counts as a hard fault</td></tr>
+            <tr><td><code>MC_SUP_PROBATION_MS</code></td><td class="num">3000</td><td>Trial period after a rebuild</td></tr>
+            <tr><td><code>MC_SUP_PROBE_FIRST_MS</code> / <code>_MAX_MS</code></td><td class="num">5000 / 60000</td><td>First retry of a quarantined port, and the backoff cap</td></tr>
+            <tr><td><code>MC_SUP_STORM_ERRORS</code></td><td class="num">100</td><td>Line errors per second that mark a port DEGRADED</td></tr>
+            <tr><td><code>MC_SUP_BOARD_FAULT_DCS</code></td><td class="num">3</td><td>DataController ports faulted at once that trigger the one-time board reset</td></tr>
           </tbody>
         </table>
       </div>
@@ -1014,7 +1103,7 @@
 
     <!-- ===================================================== 14 -->
     <section id="files">
-      <div class="sec-head"><span class="sec-no">14</span><h2>File map</h2></div>
+      <div class="sec-head"><span class="sec-no">15</span><h2>File map</h2></div>
       <div class="tbl">
         <table>
           <thead><tr><th>File</th><th>Layer</th><th>Responsibility</th></tr></thead>
@@ -1023,9 +1112,9 @@
             <tr><td><code>Core/Src/mc_line.c</code></td><td>pure core</td><td>Bounded line builder: TEXT / DISCARD / BINARY states, resync</td></tr>
             <tr><td><code>Core/Src/mc_txq.c</code></td><td>pure core</td><td>Whole-line slot queue: urgent and front insert, tag purge, locked head</td></tr>
             <tr><td><code>Core/Inc/mc_config.h</code></td><td>pure core</td><td>Every tunable</td></tr>
-            <tr><td><code>Core/Src/mc_app.c</code></td><td>application</td><td>Receive integrity, routing, admission, transmit service, health, <code>mc_*</code> commands</td></tr>
+            <tr><td><code>Core/Src/mc_app.c</code></td><td>application</td><td>Receive integrity, routing, admission, transmit service, port health supervisor, <code>mc_*</code> commands</td></tr>
             <tr><td><code>Core/Inc/mc_platform.h</code></td><td>contract</td><td>The hardware interface the application depends on</td></tr>
-            <tr><td><code>Core/Src/mc_platform.c</code></td><td>board</td><td>DMA RX, IT TX, flag polling, recovery, reset cause, LEDs, watchdog</td></tr>
+            <tr><td><code>Core/Src/mc_platform.c</code></td><td>board</td><td>DMA RX, IT TX, flag polling, per-port UART rebuild, reset cause, LEDs, watchdog</td></tr>
             <tr><td><code>Core/Src/main.c</code>, <code>stm32h7xx_it.c</code></td><td>generated</td><td>CubeMX init, plus hooks in USER CODE blocks</td></tr>
             <tr><td><code>tests/host/*</code></td><td>verification</td><td>Unit and app tests, fake platform, simulator, script self-test</td></tr>
             <tr><td><code>tools/loopback_test.py</code></td><td>verification</td><td>Hardware loopback commissioning</td></tr>

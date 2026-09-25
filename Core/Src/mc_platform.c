@@ -45,8 +45,6 @@ extern IWDG_HandleTypeDef hiwdg1;
    stalls are detected and reported (rx_overruns).                          */
 #define PC_RX_BYTES   49152u   /* ~533 ms of continuous input at 921600 */
 #define DC_RX_BYTES   8192u    /* ~1.4 s of continuous input at 57600   */
-/* Consecutive failed DMA restarts before the board resets itself. */
-#define DMA_RESTART_LIMIT 50u
 
 #define FAULT_MAGIC   0xFA170000u
 #define FAULT_MASK    0xFFFF0000u
@@ -59,7 +57,7 @@ typedef struct {
     uint16_t            rx_size;
     uint16_t            rx_tail;
     uint32_t            rx_ring_ms;    /* time to fill the ring at line rate */
-    uint32_t            rx_fail_run;   /* consecutive failed restarts        */
+    uint8_t             enabled;       /* 0 while quarantined               */
     volatile uint8_t    tx_busy;
     mc_hw_stats_t       hw;
 } plat_port_t;
@@ -78,7 +76,7 @@ static void capture_reset_cause(void)
 {
     static const char *faults[] = {
         "", "ERROR_HANDLER", "HARDFAULT", "MEMMANAGE", "BUSFAULT", "USAGEFAULT", "NMI",
-        "DMA_FAILURE" };
+        "DMA_FAILURE", "PORT_FAULTS" };
     const char *why = "UNKNOWN";
 
     __HAL_RCC_RTC_CLK_ENABLE();                /* TAMP backup register access */
@@ -199,16 +197,16 @@ static void poll_flags(plat_port_t *p)
 static void service_port(plat_port_t *p, uint32_t gap_ms)
 {
     poll_flags(p);
-    if (!p->rx_buf)
-        return;
+    if (!p->rx_buf || !p->enabled)
+        return;                     /* quarantined: the supervisor decides */
     if (gap_ms >= p->rx_ring_ms)
         ++p->hw.rx_overruns;
     if (!rx_running(p)) {
+        /* Escalation (reinit, quarantine) is the supervisor's job in
+           mc_app.c; it watches rx_restarts and rx_restart_fails.          */
         ++p->hw.rx_restarts;
-        if (rx_start(p))
-            p->rx_fail_run = 0;
-        else if (++p->rx_fail_run >= DMA_RESTART_LIMIT)
-            mc_board_fatal(MC_FAULT_DMA);       /* a reset restores all DMA */
+        if (!rx_start(p))
+            ++p->hw.rx_restart_fails;
     }
 }
 
@@ -303,17 +301,12 @@ const char *mc_plat_reset_cause(void) { return reset_cause; }
 
 /* ---------------------------------------------------------------- board */
 
-static void port_setup(unsigned i, UART_HandleTypeDef *h, const char *name,
-                       uint8_t *rx, uint16_t rx_size)
+/* Everything MasterController-specific on top of the CubeMX init; run at
+   boot and again after every reinit. Returns 1 if reception is running.  */
+static int configure_port(plat_port_t *p)
 {
-    plat_port_t *p = &P[i];
-    p->h = h;
-    p->name = name;
-    p->baud = h->Init.BaudRate;
-    p->rx_buf = rx;
-    p->rx_size = rx_size;
-    /* Conservative: 3/4 of the time it takes to fill the ring at 10 bits/byte. */
-    p->rx_ring_ms = rx_size ? (uint32_t)((uint64_t)rx_size * 10000u * 3u / 4u / p->baud) : 0u;
+    UART_HandleTypeDef *h = p->h;
+    p->tx_busy = 0;
 
     /* FIFO mode: the TX interrupt refills 8 bytes at a time. */
     (void)HAL_UARTEx_SetTxFifoThreshold(h, UART_TXFIFO_THRESHOLD_1_2);
@@ -326,8 +319,68 @@ static void port_setup(unsigned i, UART_HandleTypeDef *h, const char *name,
     SET_BIT(h->Instance->CR3, USART_CR3_OVRDIS);
     __HAL_UART_ENABLE(h);
 
-    if (rx && !rx_start(p))
-        mc_board_fatal(MC_FAULT_DMA);
+    return p->rx_buf ? rx_start(p) : 1;
+}
+
+static void port_setup(unsigned i, UART_HandleTypeDef *h, const char *name,
+                       uint8_t *rx, uint16_t rx_size)
+{
+    plat_port_t *p = &P[i];
+    p->h = h;
+    p->name = name;
+    p->baud = h->Init.BaudRate;
+    p->rx_buf = rx;
+    p->rx_size = rx_size;
+    p->enabled = 1;
+    /* Conservative: 3/4 of the time it takes to fill the ring at 10 bits/byte. */
+    p->rx_ring_ms = rx_size ? (uint32_t)((uint64_t)rx_size * 10000u * 3u / 4u / p->baud) : 0u;
+    if (!configure_port(p))
+        mc_board_fatal(MC_FAULT_DMA);          /* cannot even start at boot */
+}
+
+/* --------------------------------------------------------------- recovery */
+
+static void pulse_reset(const USART_TypeDef *u)
+{
+    if      (u == USART2)  { __HAL_RCC_USART2_FORCE_RESET();  __HAL_RCC_USART2_RELEASE_RESET(); }
+    else if (u == USART10) { __HAL_RCC_USART10_FORCE_RESET(); __HAL_RCC_USART10_RELEASE_RESET(); }
+    else if (u == UART7)   { __HAL_RCC_UART7_FORCE_RESET();   __HAL_RCC_UART7_RELEASE_RESET(); }
+    else if (u == UART4)   { __HAL_RCC_UART4_FORCE_RESET();   __HAL_RCC_UART4_RELEASE_RESET(); }
+    else if (u == UART5)   { __HAL_RCC_UART5_FORCE_RESET();   __HAL_RCC_UART5_RELEASE_RESET(); }
+    else if (u == UART9)   { __HAL_RCC_UART9_FORCE_RESET();   __HAL_RCC_UART9_RELEASE_RESET(); }
+    else if (u == USART6)  { __HAL_RCC_USART6_FORCE_RESET();  __HAL_RCC_USART6_RELEASE_RESET(); }
+}
+
+/* Rebuild one routed port. The diagnostics port belongs to the BSP and is
+   not rebuilt. HAL_UART_DeInit runs the CubeMX MSP de-init (clock, pins,
+   DMA stream, IRQ); HAL_UART_Init runs the MSP init again from the saved
+   handle settings, recreating pins, kernel clock, DMA and NVIC.            */
+int mc_plat_port_reinit(unsigned port)
+{
+    if (port >= MC_NUM_PORTS || port == MC_PORT_DBG || !P[port].h) return 0;
+    plat_port_t *p = &P[port];
+    UART_HandleTypeDef *h = p->h;
+
+    CLEAR_BIT(h->Instance->CR3, USART_CR3_DMAR);
+    (void)HAL_UART_Abort(h);
+    (void)HAL_DMA_Abort(h->hdmarx);
+    (void)HAL_UART_DeInit(h);
+    pulse_reset(h->Instance);
+    p->tx_busy = 0;
+    if (HAL_UART_Init(h) != HAL_OK)
+        return 0;
+    return configure_port(p);
+}
+
+void mc_plat_port_enable(unsigned port, int enable)
+{
+    if (port < MC_NUM_PORTS)
+        P[port].enabled = (uint8_t)(enable != 0);
+}
+
+void mc_plat_system_reset(void)
+{
+    mc_board_fatal(MC_FAULT_PORTS);
 }
 
 void mc_board_init(void)

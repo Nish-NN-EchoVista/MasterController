@@ -15,16 +15,22 @@ typedef struct {
     const uint8_t *pending;
     uint16_t pending_len;
     unsigned starts, aborts;
+    unsigned reinits;
+    int      heals, reinit_fails, disabled;
     mc_hw_stats_t hw;
 } fport_t;
 
 static fport_t fp[MC_NUM_PORTS];
 static uint32_t now_ms;
+static unsigned system_resets;
+static const char *reset_cause = "TEST";
 
 void fake_reset(void)
 {
     memset(fp, 0, sizeof fp);
     now_ms = 1000;
+    system_resets = 0;
+    reset_cause = "TEST";
 }
 
 void fake_advance(uint32_t ms) { now_ms += ms; }
@@ -97,7 +103,7 @@ int mc_plat_tx_busy(unsigned port) { return fp[port].busy; }
 int mc_plat_tx_start(unsigned port, const uint8_t *data, uint16_t len)
 {
     fport_t *p = &fp[port];
-    if (p->busy) return 0;
+    if (p->busy || p->mode == FAKE_TX_REFUSE) return 0;
     p->pending = data;
     p->pending_len = len;
     p->busy = 1;
@@ -115,4 +121,25 @@ void mc_plat_tx_abort(unsigned port)
 
 void mc_plat_hw_stats(unsigned port, mc_hw_stats_t *out) { *out = fp[port].hw; }
 
-const char *mc_plat_reset_cause(void) { return "TEST"; }
+const char *mc_plat_reset_cause(void) { return reset_cause; }
+
+int mc_plat_port_reinit(unsigned port)
+{
+    fport_t *p = &fp[port];
+    ++p->reinits;
+    p->busy = 0;
+    p->rx_tail = p->rx_head;            /* unread input is discarded */
+    if (p->reinit_fails) return 0;
+    if (p->heals) p->mode = FAKE_TX_AUTO;
+    return 1;
+}
+
+void mc_plat_port_enable(unsigned port, int enable) { fp[port].disabled = !enable; }
+void mc_plat_system_reset(void) { ++system_resets; }
+
+unsigned fake_reinits(unsigned port) { return fp[port].reinits; }
+void     fake_reinit_heals(unsigned port, int heals) { fp[port].heals = heals; }
+void     fake_reinit_fails(unsigned port, int fails) { fp[port].reinit_fails = fails; }
+int      fake_enabled(unsigned port) { return !fp[port].disabled; }
+unsigned fake_system_resets(void) { return system_resets; }
+void     fake_set_reset_cause(const char *cause) { reset_cause = cause; }
