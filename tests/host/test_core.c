@@ -309,6 +309,10 @@ static void test_route_dc_local_broadcast(void)
 
     route("mc_status");
     CHECK(rt.kind == MC_ROUTE_LOCAL);
+    route("dc_status");   CHECK(rt.kind == MC_ROUTE_LOCAL);
+    route(" dc_status "); CHECK(rt.kind == MC_ROUTE_LOCAL);
+    route("dc_statusx");  CHECK(rt.kind == MC_ROUTE_BROADCAST);   /* not ours */
+    route("dc_status 1"); CHECK(rt.kind == MC_ROUTE_BROADCAST);
 
     route("start_defog");
     CHECK(rt.kind == MC_ROUTE_BROADCAST && rt.tag == MC_TAG_BOTH && !rt.urgent);

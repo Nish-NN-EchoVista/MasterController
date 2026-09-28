@@ -38,6 +38,9 @@ class FakeLink:
         self.pending = []
         return got, mc
 
+    def wake(self):
+        pass
+
 
 def expect(name, result, want):
     ok = result == want

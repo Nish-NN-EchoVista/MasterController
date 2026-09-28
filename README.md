@@ -58,6 +58,54 @@ they are broadcast to all six DataControllers unchanged.
 The MC rejects malformed addresses with an `[MC] E:` line and sends
 nothing. This covers `@13`, `@01`, `@1` with no command, `#7`, and similar.
 
+### Running with fewer than six DataControllers
+
+Any number of DataControllers from 0 to 6 can be connected, on any ports,
+and plugged or unplugged while running. Addresses are fixed by port:
+DataController *k* always owns `@(2k−1)`/`@2k`, however many others are
+connected. Each port is in one of three states:
+
+| State | Meaning | What you get |
+|---|---|---|
+| **live** | Traffic in the last 3 s (every F401 prints `PZT Temp` every 500 ms) | Normal routing |
+| **absent** | No traffic at all since boot: nothing plugged in | Quiet: no warning and no red LED. Running with fewer than six is normal. |
+| **lost** | Was live, then went silent: a cable or DataController failed | `[MC] W: DC3 (port 3, …) lost: silent for … ms`, and the red LED lights |
+
+A DataController that reappears is reported as `I: DCk online`, or
+`I: DCk back online` if it had been lost.
+
+- **Addressed commands** (`@n`, `#k`) to an absent or lost DataController
+  are **refused with a reply** instead of vanishing:
+  - `[MC] E: DC6 (port 6) not connected, not sent: @11 start_sweep`
+  - `[MC] E: DC3 (port 3) lost, silent for 5 s, not sent: @5 get volt`
+
+  Each refused command gets its own reply. Only a flood of more than 10
+  per second is summarised.
+- **Stops always go out**, even to absent or lost ports. A silent
+  DataController may still be running, and a stop must never be held back
+  on a guess. To a lost one they go out with a warning.
+- **Broadcasts go to every port**, connected or not, with no reply about
+  absent ones. If a lost DataController exists, the broadcast still goes to
+  it and the laptop is told:
+  `[MC] W: broadcast also sent to lost DataController(s) DC3: …`.
+- **`dc_status`** is answered by the MasterController itself, never
+  forwarded. It lists every DataController with its port, UART and
+  addresses:
+
+  ```
+  [MC] dc_status: 4 live, 1 absent, 1 lost
+  [MC]   live   DC1 (port 1, USART10 PE3/PE2, @1,@2) last_rx=212ms
+  [MC]   live   DC2 (port 2, UART7 PF7/PF6, @3,@4) last_rx=180ms
+  [MC]   live   DC4 (port 4, UART5 PB13/PB12, @7,@8) last_rx=95ms
+  [MC]   live   DC5 (port 5, UART9 PD15/PD14, @9,@10) last_rx=402ms
+  [MC]   absent DC6 (port 6, USART6 PC6/PC7, @11,@12)
+  [MC]   lost   DC3 (port 3, UART4 PA0/PA1, @5,@6) silent for 42 s
+  ```
+
+  A DataController whose port is not healthy (see
+  [Self-healing ports](#self-healing-ports)) also shows that state, for
+  example `[FAULTED: tx_stalls]`.
+
 Lines may end in CR, LF or CRLF. Empty lines are ignored. Everything sent
 downstream ends in CRLF.
 
@@ -205,19 +253,21 @@ never happen in practice.
 
 | Command | Reply |
 |---|---|
+| `dc_status` | Which DataControllers are live, absent and lost, with port numbers (see above) |
 | `mc_help` | Command summary |
 | `mc_ping` | `[MC] pong` (lets the GUI detect a MasterController) |
 | `mc_version` | Firmware version and build time |
-| `mc_status` | Uptime, reset cause, worst main-loop time, then one line per port: online/offline, time since last byte, bytes/lines, queue depth, drops, framing/noise errors, DMA restarts, TX stalls, `health=` state (with the fault reason), recoveries and quarantines |
+| `mc_status` | Uptime, reset cause, worst main-loop time, then one line per port: live/absent/lost, time since last byte, bytes/lines, queue depth, drops, framing/noise errors, DMA restarts, TX stalls, `health=` state (with the fault reason), recoveries and quarantines |
 | `mc_reset_stats` | Zero all counters |
 | `mc_recover <1..6\|pc\|all>` | Rebuild a port now, or probe a faulted port now |
 
 Unsolicited `[MC]` lines:
 - A boot banner that includes the reset cause (`POWER_ON`, `WATCHDOG`,
   `HARDFAULT`, `ERROR_HANDLER`, `BROWNOUT`, …).
-- `I: DCk online`, `W: DCk offline: silent for … ms` and
-  `W: DCk not detected`. DataControllers print `PZT Temp` every 500 ms,
-  so 3 s of silence means a DataController has gone.
+- `I: DCk … online`, `I: DCk … back online` and `W: DCk … lost: silent
+  for … ms`.
+- One `I: DataControllers live: …; absent (not connected): …` summary,
+  3 s after boot.
 - Rate-limited warnings about drops or rejected lines.
 
 Every `[MC]` line is also mirrored to the **ST-LINK virtual COM port**
@@ -230,7 +280,7 @@ link.
 |---|---|
 | Green LD1 | 1 Hz heartbeat. The main loop is running. |
 | Yellow LD2 | Flickers with routed traffic |
-| Red LD3 | A DataController is offline, any port is not healthy, or something was dropped in the last 2 s |
+| Red LD3 | A DataController is **lost** (absent ones don't count), any port is not healthy, or something was dropped in the last 2 s |
 | Blue button B1 | Prints a full `mc_status` report |
 
 ## Building
@@ -340,8 +390,8 @@ python tools/loopback_test.py socket://localhost:5555
 2. Open the laptop adapter at **921600** and send `mc_ping`. Expect
    `[MC] pong`.
 3. Connect DataControllers one at a time. Each should produce
-   `[MC] I: DCk online`, followed by `[DC-k] PZT Temp: …` lines every
-   500 ms.
+   `[MC] I: DCk (port k, …) online`, followed by `[DC-k] PZT Temp: …`
+   lines every 500 ms. `dc_status` should list it as live.
 4. Run `mc_status`. For every connected port, `fe=` and `ne=` should stay
    at 0. Rising counts point to wiring, grounding or baud problems.
 5. Send `@1 <harmless get command>` and check it reaches only DC1 board 1.

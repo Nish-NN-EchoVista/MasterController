@@ -12,6 +12,15 @@ static int starts_with(const char *s, size_t len, const char *prefix)
     return len >= n && memcmp(s, prefix, n) == 0;
 }
 
+/* 1 if the line is exactly word, surrounding blanks ignored. */
+static int is_word(const char *s, size_t len, const char *word)
+{
+    size_t n = strlen(word);
+    while (len && (*s == ' ' || *s == '\t')) { ++s; --len; }
+    while (len && (s[len - 1u] == ' ' || s[len - 1u] == '\t')) --len;
+    return len == n && memcmp(s, word, n) == 0;
+}
+
 int mc_is_urgent(const char *cmd, size_t len)
 {
     while (len && (*cmd == ' ' || *cmd == '\t')) { ++cmd; --len; }
@@ -45,7 +54,7 @@ void mc_route_pc_line(const char *line, uint16_t len, mc_route_t *r)
     r->payload_len = len;
     r->tag = MC_TAG_BOTH;
 
-    if (starts_with(line, len, "mc_")) {
+    if (starts_with(line, len, "mc_") || is_word(line, len, "dc_status")) {
         r->kind = MC_ROUTE_LOCAL;
         return;
     }

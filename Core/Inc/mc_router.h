@@ -6,7 +6,7 @@
  *                            DataController ceil(n/2).
  *   "#k <cmd>"   k = 1..6    "<cmd>" sent verbatim to DataController k
  *                            (DC-level commands such as enable_pump, lockout++).
- *   "mc_..."                 handled by the MasterController itself.
+ *   "mc_...", "dc_status"    handled by the MasterController itself.
  *   anything else            broadcast verbatim to all six DataControllers,
  *                            exactly as a single DataController would receive
  *                            it today (including "@0 ..." pump commands).

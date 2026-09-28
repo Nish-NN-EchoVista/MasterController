@@ -89,6 +89,7 @@ typedef struct {
     uint32_t last_ms;
     uint32_t pending;
     uint8_t  armed;
+    uint8_t  used;          /* reports made in the current interval */
 } ratelimit_t;
 
 static port_t ports[MC_NUM_PORTS];
@@ -105,7 +106,8 @@ static uint32_t mc_lines_lost;         /* [MC] replies that found no room   */
 static uint8_t  had_drop;
 static volatile uint8_t status_requested;
 static ratelimit_t rl_busy, rl_pc_binary, rl_pc_overlong, rl_tainted;
-static ratelimit_t rl_partial, rl_faulted;
+static ratelimit_t rl_partial, rl_faulted, rl_absent, rl_lost_bcast;
+static uint8_t  presence_summary_done;
 static uint8_t  board_reset_pending, board_reset_declined;
 static uint32_t board_reset_at_ms;
 static uint32_t busy_total;
@@ -152,6 +154,23 @@ static int ratelimit_hit(ratelimit_t *r, uint32_t now)
     if (!r->armed || elapsed(now, r->last_ms) >= MC_WARN_INTERVAL_MS) {
         r->armed = 1;
         r->last_ms = now;
+        return 1;
+    }
+    ++r->pending;
+    return 0;
+}
+
+/* For replies to individual commands: each refused command gets its own
+   reply, up to MC_REPLY_BURST per interval; only a flood is summarised.  */
+static int ratelimit_reply(ratelimit_t *r, uint32_t now)
+{
+    if (!r->armed || elapsed(now, r->last_ms) >= MC_WARN_INTERVAL_MS) {
+        r->armed = 1;
+        r->last_ms = now;
+        r->used = 0;
+    }
+    if (r->used < MC_REPLY_BURST) {
+        ++r->used;
         return 1;
     }
     ++r->pending;
@@ -479,6 +498,86 @@ static void manual_recover(unsigned port, uint32_t now)
         quarantine(port, "reinit_failed", now);
 }
 
+/* ------------------------------------------------------- presence */
+
+/*
+ * A DataController port is, at any moment:
+ *   LIVE    traffic within MC_DC_SILENT_MS (every F401 prints every 500 ms)
+ *   ABSENT  no traffic at all since boot: nothing plugged in. Quiet: no
+ *           warning, no red LED. Running with fewer than six is normal.
+ *   LOST    was live, then went silent: a cable or DataController failed.
+ *           Warned about, lights the red LED.
+ * Computed from the receive timestamps directly, so a command is never
+ * judged by a status flag that is one poll out of date.
+ */
+enum { P_ABSENT = 0, P_LIVE, P_LOST };
+
+static int dc_presence(unsigned k, uint32_t now)
+{
+    const port_t *p = dc(k);
+    if (!p->seen)
+        return P_ABSENT;
+    return elapsed(now, p->last_rx_ms) < MC_DC_SILENT_MS ? P_LIVE : P_LOST;
+}
+
+static const char *presence_name(int pr)
+{
+    return pr == P_LIVE ? "live" : pr == P_LOST ? "lost" : "absent";
+}
+
+/* "DC3 (port 3, UART4 PA0/PA1, @5,@6)" */
+static int describe_dc(char *buf, size_t cap, unsigned k)
+{
+    return snprintf(buf, cap, "DC%u (port %u, %s, @%u,@%u)", k, k,
+                    mc_plat_port_name(MC_PORT_DC(k)), 2u * k - 1u, 2u * k);
+}
+
+/* List the DataControllers in one presence state: "DC1 DC4" or "none". */
+static void list_presence(char *buf, size_t cap, int pr, uint32_t now)
+{
+    size_t n = 0;
+    buf[0] = '\0';
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k) {
+        if (dc_presence(k, now) != pr) continue;
+        int w = snprintf(buf + n, cap - n, "%sDC%u", n ? " " : "", k);
+        if (w > 0 && (size_t)w < cap - n) n += (size_t)w;
+    }
+    if (!n) snprintf(buf, cap, "none");
+}
+
+/* dc_status: which DataControllers are live, absent and lost. */
+static void report_dc_status(uint32_t now)
+{
+    unsigned count[3] = { 0, 0, 0 };
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        ++count[dc_presence(k, now)];
+    emit("dc_status: %u live, %u absent, %u lost", count[P_LIVE], count[P_ABSENT],
+         count[P_LOST]);
+    static const int order[3] = { P_LIVE, P_ABSENT, P_LOST };
+    for (unsigned i = 0; i < 3u; ++i) {
+        for (unsigned k = 1; k <= MC_NUM_DC; ++k) {
+            int pr = dc_presence(k, now);
+            if (pr != order[i]) continue;
+            char d[64], extra[64];
+            const port_t *p = dc(k);
+            describe_dc(d, sizeof d, k);
+            extra[0] = '\0';
+            if (pr == P_LIVE)
+                snprintf(extra, sizeof extra, " last_rx=%lums",
+                         (unsigned long)elapsed(now, p->last_rx_ms));
+            else if (pr == P_LOST)
+                snprintf(extra, sizeof extra, " silent for %lu s",
+                         (unsigned long)(elapsed(now, p->last_rx_ms) / 1000u));
+            if (p->health != H_OK) {
+                size_t e = strlen(extra);
+                snprintf(extra + e, sizeof extra - e, " [%s: %s]",
+                         health_name(p->health), p->fault_reason ? p->fault_reason : "");
+            }
+            emit("  %-6s %s%s", presence_name(pr), d, extra);
+        }
+    }
+}
+
 /* ---------------------------------------------------------- PC -> DCs */
 
 /* Admission threshold for ordinary traffic: the reserve is left for urgent
@@ -523,7 +622,7 @@ static void send_normal(const mc_route_t *r, const uint8_t *out, uint16_t n,
         if (r->kind != MC_ROUTE_BROADCAST) {
             ++dc(k)->c.rejected;
             note_drop(now);
-            if (ratelimit_hit(&rl_faulted, now))
+            if (ratelimit_reply(&rl_faulted, now))
                 emit("E: DC%u is faulted (%s), not sent: %.*s", k,
                      dc(k)->fault_reason, clip(len), line);
             return;
@@ -533,7 +632,7 @@ static void send_normal(const mc_route_t *r, const uint8_t *out, uint16_t n,
     }
     if (!available) {
         note_drop(now);
-        if (ratelimit_hit(&rl_faulted, now))
+        if (ratelimit_reply(&rl_faulted, now))
             emit("E: no DataController available (all faulted), not sent: %.*s",
                  clip(len), line);
         return;
@@ -547,7 +646,7 @@ static void send_normal(const mc_route_t *r, const uint8_t *out, uint16_t n,
             ++dc(k)->c.rejected;
             ++busy_total;
             note_drop(now);
-            if (ratelimit_hit(&rl_busy, now))
+            if (ratelimit_reply(&rl_busy, now))
                 emit("E: busy (DC%u queue full), not sent: %.*s", k, clip(len), line);
             return;
         }
@@ -602,6 +701,39 @@ static void handle_pc_line(const char *line, uint16_t len, uint32_t now)
 
     unsigned first = r.kind == MC_ROUTE_BROADCAST ? 1u : r.dc;
     unsigned last  = r.kind == MC_ROUTE_BROADCAST ? MC_NUM_DC : r.dc;
+
+    if (r.kind != MC_ROUTE_BROADCAST) {
+        /* Addressed: an ordinary command to a DataController that is not
+           there is refused with a reply instead of vanishing. Stops always
+           go out: a silent DataController may still be running.          */
+        int pr = dc_presence(r.dc, now);
+        if (pr != P_LIVE && !r.urgent) {
+            ++dc(r.dc)->c.rejected;
+            if (ratelimit_reply(&rl_absent, now)) {
+                if (pr == P_ABSENT)
+                    emit("E: DC%u (port %u) not connected, not sent: %.*s",
+                         r.dc, r.dc, clip(len), line);
+                else
+                    emit("E: DC%u (port %u) lost, silent for %lu s, not sent: %.*s",
+                         r.dc, r.dc,
+                         (unsigned long)(elapsed(now, dc(r.dc)->last_rx_ms) / 1000u),
+                         clip(len), line);
+            }
+            return;
+        }
+        if (pr == P_LOST)
+            emit("W: DC%u (port %u) is lost; '%.*s' sent anyway", r.dc, r.dc,
+                 clip(r.payload_len), r.payload);
+    } else {
+        /* Broadcast: every port gets it, connected or not. Only lost
+           DataControllers are worth a word: they were there before.      */
+        char lost[40];
+        list_presence(lost, sizeof lost, P_LOST, now);
+        if (strcmp(lost, "none") != 0 && ratelimit_hit(&rl_lost_bcast, now))
+            emit("W: broadcast also sent to lost DataController(s) %s: %.*s",
+                 lost, clip(len), line);
+    }
+
     if (r.urgent)
         send_urgent(&r, out, (uint16_t)n, first, last, now);
     else
@@ -673,7 +805,7 @@ static void report_status(uint32_t now)
              "rejected=%lu purged=%lu overlong=%lu binary=%lu fe=%lu ne=%lu "
              "overruns=%lu dma_restarts=%lu stalls=%lu health=%s%s%s%s "
              "recoveries=%lu quarantines=%lu",
-             k, mc_plat_port_name(MC_PORT_DC(k)), p->online ? "online" : "OFFLINE",
+             k, mc_plat_port_name(MC_PORT_DC(k)), presence_name(dc_presence(k, now)),
              2u * k - 1u, 2u * k, age,
              (unsigned long)p->c.rx_bytes, (unsigned long)p->c.rx_lines,
              (unsigned long)p->c.up_dropped, (unsigned long)p->c.tx_lines,
@@ -714,6 +846,8 @@ static void handle_local(const char *line, uint16_t len)
 #define IS(cmd) (len == sizeof(cmd) - 1u && memcmp(line, cmd, len) == 0)
     if (IS("mc_status")) {
         report_status(now);
+    } else if (len >= 9u && memcmp(line, "dc_status", 9) == 0) {
+        report_dc_status(now);
     } else if (IS("mc_version")) {
         emit("MasterController %s (built %s %s), %u DataControllers x %u EVS2",
              MC_FW_VERSION, __DATE__, __TIME__, (unsigned)MC_NUM_DC,
@@ -741,7 +875,8 @@ static void handle_local(const char *line, uint16_t len)
         emit("@1..@12 <cmd>: one EVS2 | #1..#6 <cmd>: one DataController | "
              "<cmd>: all six DataControllers");
         emit("stop, cancel, @0 stop_all: sent ahead of queued lines, which are discarded");
-        emit("mc_status mc_version mc_ping mc_reset_stats mc_recover <1..6|pc|all> mc_help");
+        emit("dc_status mc_status mc_version mc_ping mc_reset_stats "
+             "mc_recover <1..6|pc|all> mc_help");
     } else {
         emit("E: unknown MasterController command: %.*s", clip(len), line);
     }
@@ -950,17 +1085,19 @@ static void service_health(uint32_t now)
     report_line_errors(MC_PORT_PC, now);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k) {
         port_t *p = dc(k);
-        int alive = p->seen && elapsed(now, p->last_rx_ms) < MC_DC_SILENT_MS;
+        int alive = dc_presence(k, now) == P_LIVE;
         if (alive && !p->online) {
+            char d[64];
+            describe_dc(d, sizeof d, k);
+            emit(p->missing_reported ? "I: %s back online" : "I: %s online", d);
             p->online = 1;
-            emit("I: DC%u online (%s)", k, mc_plat_port_name(MC_PORT_DC(k)));
         } else if (!alive && p->online) {
+            char d[64];
+            describe_dc(d, sizeof d, k);
             p->online = 0;
-            emit("W: DC%u offline: silent for %lu ms", k,
+            p->missing_reported = 1;            /* now "lost", not "absent" */
+            emit("W: %s lost: silent for %lu ms", d,
                  (unsigned long)elapsed(now, p->last_rx_ms));
-        } else if (!p->seen && after_grace && !p->missing_reported) {
-            p->missing_reported = 1;
-            emit("W: DC%u not detected on %s", k, mc_plat_port_name(MC_PORT_DC(k)));
         }
         report_line_errors(MC_PORT_DC(k), now);
         if (p->c.up_dropped != p->up_reported &&
@@ -971,7 +1108,17 @@ static void service_health(uint32_t now)
             p->up_report_ms = now;
         }
     }
+    if (after_grace && !presence_summary_done) {
+        /* One informational line once the DataControllers have had time to
+           speak. Absent ports are normal: no warning, no red LED.         */
+        char live[40], absent[40];
+        presence_summary_done = 1;
+        list_presence(live, sizeof live, P_LIVE, now);
+        list_presence(absent, sizeof absent, P_ABSENT, now);
+        emit("I: DataControllers live: %s; absent (not connected): %s", live, absent);
+    }
     ratelimit_flush(&rl_busy, now, "E: busy, further lines not sent");
+    ratelimit_flush(&rl_absent, now, "E: commands to absent/lost DataControllers not sent");
     ratelimit_flush(&rl_pc_binary, now, "E: binary frames discarded");
     ratelimit_flush(&rl_pc_overlong, now, "E: overlong lines discarded");
     ratelimit_flush(&rl_tainted, now, "E: lines received with UART errors not sent");
@@ -997,6 +1144,9 @@ void mc_app_init(void)
     memset(&rl_tainted, 0, sizeof rl_tainted);
     memset(&rl_partial, 0, sizeof rl_partial);
     memset(&rl_faulted, 0, sizeof rl_faulted);
+    memset(&rl_absent, 0, sizeof rl_absent);
+    memset(&rl_lost_bcast, 0, sizeof rl_lost_bcast);
+    presence_summary_done = 0;
     board_reset_pending = board_reset_declined = 0;
     boot_ms = mc_plat_now_ms();
     last_activity_ms = boot_ms;
@@ -1056,7 +1206,7 @@ int mc_app_fault_active(void)
     if (pc()->health != H_OK)
         return 1;
     for (unsigned k = 1; k <= MC_NUM_DC; ++k)
-        if (!dc(k)->online || dc(k)->health != H_OK)
+        if (dc_presence(k, now) == P_LOST || dc(k)->health != H_OK)
             return 1;
     return 0;
 }

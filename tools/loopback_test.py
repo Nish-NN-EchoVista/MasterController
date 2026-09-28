@@ -50,13 +50,27 @@ class Link:
                 yield raw.decode("ascii", "replace")
 
     def collect(self, duration, want=None):
-        """Collect non-[MC] lines; stop early once `want` lines have arrived."""
+        """Collect non-[MC] lines; stop early once `want` lines have arrived.
+        Keep-alive echoes (see wake) are dropped."""
         got, mc = [], []
         for line in self.lines(duration):
+            if KEEPALIVE in line:
+                continue
             (mc if line.startswith("[MC]") else got).append(line)
             if want is not None and len(got) >= want:
                 break
         return got, mc
+
+    def wake(self):
+        """With only jumpers attached, a DataController port counts as live
+        only while traffic loops back through it (the MC refuses addressed
+        commands to absent or lost DataControllers). A broadcast wakes every
+        port; its echoes are filtered out by collect()."""
+        self.send(KEEPALIVE)
+        self.collect(0.4)
+
+
+KEEPALIVE = "loopback_keepalive"
 
 
 def expect_set(name, got, expected):
@@ -91,6 +105,7 @@ def main():
     print(f"  {'PASS' if ok else 'FAIL'} [MC] pong")
 
     print("addressing: every @n reaches only its DataController, as @1/@2")
+    link.wake()
     expected, got = [], []
     for r in range(a.rounds):
         this_round = []
@@ -105,6 +120,7 @@ def main():
     ok &= expect_set("addressed lines", got, expected)
 
     print("#k raw: reaches only DataController k, unchanged")
+    link.wake()
     for k in range(1, NUM_DC + 1):
         link.send(f"#{k} raw{k}")
     got, _ = link.collect(2.0, want=NUM_DC)
@@ -119,6 +135,7 @@ def main():
     ok &= expect_set("broadcast lines", got, expected)
 
     print("burst: back-to-back lines to every board arrive whole and in order")
+    link.wake()
     expected = []
     for i in range(a.burst):
         for n in range(1, 2 * NUM_DC + 1):
@@ -153,6 +170,7 @@ def stop_test(link):
     before the stop or is discarded (and reported), none arrives after it,
     and the two together account for every line sent."""
     print("stop: overtakes and purges queued lines")
+    link.wake()
     for i in range(QUEUED):
         link.send(f"@1 queued-{i}-" + "y" * 200)
     link.send("@1 stop")

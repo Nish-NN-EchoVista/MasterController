@@ -55,6 +55,9 @@
 #define MC_STARTUP_GRACE_MS    3000u
 /* Rate limit for repeated warnings (drops, binary frames, busy).            */
 #define MC_WARN_INTERVAL_MS    1000u
+/* Refused commands each get their own reply, up to this many per interval;
+   beyond that (a flood) the rest are counted and summarised.              */
+#define MC_REPLY_BURST         10u
 /* After a PC-link UART error, a line whose first byte arrives within this
    time of the error is also discarded: the lost byte may have been its
    first character. A line starting later cannot contain the lost byte,

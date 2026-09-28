@@ -9,6 +9,8 @@
 #define DC(k) MC_PORT_DC(k)
 
 static void pump(int n) { while (n-- > 0) mc_app_poll(); }
+static void stall_cycles(int n);
+static const char *pc_out(void);
 
 /* Fresh app with every DataController already talking, boot noise cleared. */
 static void boot(void)
@@ -479,37 +481,174 @@ static void test_dc_binary_frames_dropped(void)
     CHECK_STR(fake_out(PC), "[ESV2-3] a\r\n[ESV2-4] b\r\n");
 }
 
+/* Feed the given DataControllers a telemetry line every 500 ms for ms. */
+static void keep_alive(const unsigned *dcs, unsigned n, uint32_t ms)
+{
+    for (uint32_t t = 0; t < ms; t += 500u) {
+        fake_advance(500);
+        for (unsigned i = 0; i < n; ++i)
+            fake_inject(DC(dcs[i]), "PZT Temp: 1\r\n");
+        pump(3);
+    }
+}
+
 static void test_health_events(void)
 {
     fake_reset();
     mc_app_init();
     pump(2);
     fake_inject(DC(1), "PZT Temp: 1\r\n");
-    pump(2);
-    CHECK(strstr(fake_out(PC), "[MC] I: DC1 online (DC1)") != NULL);
-    /* Keep DC1 alive, let the grace period expire for the rest. */
-    for (int i = 0; i < 8; ++i) {
-        fake_advance(500);
-        fake_inject(DC(1), "PZT Temp: 1\r\n");
-        pump(2);
-    }
-    CHECK(count_of(fake_out(PC), "not detected") == 5);
-    CHECK(strstr(fake_out(PC), "[MC] W: DC2 not detected on DC2") != NULL);
-    CHECK(mc_app_fault_active());
-    /* DC1 goes silent. */
-    pump(50);                                   /* drain the PC backlog    */
+    pump(4);
+    CHECK(strstr(fake_out(PC), "[MC] I: DC1 (port 1, DC1, @1,@2) online") != NULL);
+    /* Only DC1 and DC4 are plugged in: the others are absent, quietly. */
+    static const unsigned plugged[] = { 1, 4 };
+    keep_alive(plugged, 2, 4000);
+    pump(100);
+    const char *o = fake_out(PC);
+    CHECK(strstr(o, "[MC] I: DataControllers live: DC1 DC4; absent (not connected): DC2 DC3 DC5 DC6") != NULL);
+    CHECK(strstr(o, "not detected") == NULL);
+    CHECK(strstr(o, "W:") == NULL);             /* absence is not a warning */
+    CHECK(!mc_app_fault_active());              /* red LED stays off         */
+
+    /* DC1 goes silent: that is "lost" and is warned about. */
     fake_out_clear(PC);
-    fake_advance(MC_DC_SILENT_MS + 1u);
-    pump(5);
-    CHECK(strstr(fake_out(PC), "[MC] W: DC1 offline: silent for") != NULL);
+    static const unsigned only4[] = { 4 };
+    keep_alive(only4, 1, MC_DC_SILENT_MS + 500u);
+    pump(100);
+    CHECK(strstr(fake_out(PC), "[MC] W: DC1 (port 1, DC1, @1,@2) lost: silent for") != NULL);
+    CHECK(strstr(fake_out(PC), "DC4") == NULL); /* DC4 is fine              */
+    CHECK(mc_app_fault_active());
     fake_inject(DC(1), "PZT Temp: 1\r\n");
-    pump(5);
-    CHECK(strstr(fake_out(PC), "[MC] I: DC1 online") != NULL);
+    pump(100);
+    CHECK(strstr(fake_out(PC), "[MC] I: DC1 (port 1, DC1, @1,@2) back online") != NULL);
+    CHECK(!mc_app_fault_active());
     /* Transitions are reported once, not repeatedly. */
-    pump(20);
     fake_out_clear(PC);
     pump(20);
     CHECK(fake_out_len(PC) == 0);
+}
+
+static void test_absent_and_lost_refusal(void)
+{
+    fake_reset();
+    mc_app_init();
+    static const unsigned plugged[] = { 1, 2, 3, 4 };      /* DC5, DC6 absent */
+    keep_alive(plugged, 4, 3500);
+    pump(100);
+    fake_out_clear(PC);
+
+    /* Addressed to an absent DataController: refused with a reply. */
+    fake_inject(PC, "@11 start_sweep\r\n");
+    pump(100);
+    CHECK(strstr(fake_out(PC), "[MC] E: DC6 (port 6) not connected, not sent: @11 start_sweep") != NULL);
+    CHECK(fake_out_len(DC(6)) == 0);
+    fake_inject(PC, "#5 enable_pump\r\n");
+    fake_advance(MC_WARN_INTERVAL_MS);
+    pump(100);
+    CHECK(strstr(fake_out(PC), "[MC] E: DC5 (port 5) not connected, not sent: #5 enable_pump") != NULL);
+    CHECK(fake_out_len(DC(5)) == 0);
+
+    /* Stops always go out, even to an absent port, without a complaint. */
+    fake_out_clear(PC);
+    fake_inject(PC, "@12 stop\r\n");
+    pump(100);
+    CHECK_STR(fake_out(DC(6)), "@2 stop\r\n");
+    CHECK(strstr(fake_out(PC), "DC6") == NULL);
+
+    /* Broadcasts go to every port; absent ports cause no reply. */
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k) fake_out_clear(DC(k));
+    fake_out_clear(PC);
+    fake_inject(PC, "start_defog\r\n");
+    pump(100);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        CHECK(strstr(fake_out(DC(k)), "start_defog\r\n") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC]") == NULL);
+
+    /* DC3 is lost: addressed commands refused, stops sent with a warning,
+       and broadcasts (still sent) name it.                               */
+    static const unsigned no3[] = { 1, 2, 4 };
+    keep_alive(no3, 3, MC_DC_SILENT_MS + 500u);
+    pump(100);
+    fake_out_clear(PC);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k) fake_out_clear(DC(k));
+    fake_advance(MC_WARN_INTERVAL_MS);
+    fake_inject(PC, "@5 get volt\r\n");
+    pump(100);
+    CHECK(strstr(fake_out(PC), "[MC] E: DC3 (port 3) lost, silent for 5 s, not sent: @5 get volt") != NULL);
+    CHECK(fake_out_len(DC(3)) == 0);
+    fake_inject(PC, "@6 cancel\r\n");
+    pump(100);
+    CHECK_STR(fake_out(DC(3)), "@2 cancel\r\n");
+    CHECK(strstr(fake_out(PC), "[MC] W: DC3 (port 3) is lost; 'cancel' sent anyway") != NULL);
+    fake_inject(PC, "start_sweep\r\n");
+    pump(100);
+    CHECK(strstr(fake_out(DC(3)), "start_sweep\r\n") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] W: broadcast also sent to lost DataController(s) DC3: start_sweep") != NULL);
+    CHECK(strstr(fake_out(PC), "DC5") == NULL && strstr(fake_out(PC), "DC6") == NULL);
+
+    /* It comes back: commands flow again. */
+    fake_inject(DC(3), "PZT Temp: 1\r\n");
+    pump(5);
+    fake_inject(PC, "@5 get volt\r\n");
+    pump(100);
+    CHECK(strstr(fake_out(DC(3)), "@1 get volt\r\n") != NULL);
+}
+
+static void test_refusals_each_get_a_reply(void)
+{
+    char line[32];
+    fake_reset();
+    mc_app_init();                              /* nothing connected */
+    for (unsigned i = 1; i <= MC_REPLY_BURST + 2u; ++i) {
+        snprintf(line, sizeof line, "@11 cmd%u\r\n", i);
+        fake_inject(PC, line);
+    }
+    pump(100);
+    CHECK(count_of(pc_out(), "not connected, not sent: @11 cmd") == (int)MC_REPLY_BURST);
+    CHECK(strstr(pc_out(), "not sent: @11 cmd1\r\n") != NULL);
+    CHECK(strstr(pc_out(), "not sent: @11 cmd2\r\n") != NULL);
+    fake_advance(MC_WARN_INTERVAL_MS);
+    pump(100);
+    CHECK(strstr(pc_out(), "commands to absent/lost DataControllers not sent (2 more)") != NULL);
+}
+
+static void test_dc_status_command(void)
+{
+    fake_reset();
+    mc_app_init();
+    static const unsigned plugged[] = { 1, 2, 3, 4 };
+    keep_alive(plugged, 4, 3500);
+    static const unsigned no2[] = { 1, 3, 4 };
+    keep_alive(no2, 3, MC_DC_SILENT_MS + 500u);   /* DC2 lost */
+    pump(100);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k) fake_out_clear(DC(k));
+    fake_out_clear(PC);
+    fake_inject(PC, "dc_status\r\n");
+    pump(100);
+    const char *o = fake_out(PC);
+    CHECK(strstr(o, "[MC] dc_status: 3 live, 2 absent, 1 lost\r\n") != NULL);
+    CHECK(strstr(o, "[MC]   live   DC1 (port 1, DC1, @1,@2) last_rx=") != NULL);
+    CHECK(strstr(o, "[MC]   live   DC4 (port 4, DC4, @7,@8) last_rx=") != NULL);
+    CHECK(strstr(o, "[MC]   absent DC5 (port 5, DC5, @9,@10)\r\n") != NULL);
+    CHECK(strstr(o, "[MC]   absent DC6 (port 6, DC6, @11,@12)\r\n") != NULL);
+    CHECK(strstr(o, "[MC]   lost   DC2 (port 2, DC2, @3,@4) silent for 3 s\r\n") != NULL);
+    /* Order: live, then absent, then lost. */
+    CHECK(strstr(o, "live   DC4") < strstr(o, "absent DC5") &&
+          strstr(o, "absent DC6") < strstr(o, "lost   DC2"));
+    /* Captured, never sent downstream. */
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        CHECK(fake_out_len(DC(k)) == 0);
+
+    /* A faulted DataController says so. */
+    fake_tx_mode(DC(4), FAKE_TX_STALL);
+    fake_inject(PC, "#4 x\r\n");
+    stall_cycles((int)MC_SUP_STALL_STRIKES + 1);
+    fake_inject(DC(4), "PZT Temp: 1\r\n");
+    pump(100);
+    fake_out_clear(PC);
+    fake_inject(PC, "dc_status\r\n");
+    pump(100);
+    CHECK(strstr(fake_out(PC), "DC4 (port 4, DC4, @7,@8) last_rx=0ms [FAULTED: tx_stalls]") != NULL);
 }
 
 static void test_status_and_local_commands(void)
@@ -522,8 +661,8 @@ static void test_status_and_local_commands(void)
     const char *o = fake_out(PC);
     CHECK(strstr(o, "[MC] status up=") != NULL);
     CHECK(strstr(o, "[MC] PC  PC 921600 baud") != NULL);
-    CHECK(strstr(o, "[MC] DC1 DC1 online @1,@2") != NULL);
-    CHECK(strstr(o, "[MC] DC6 DC6 online @11,@12") != NULL);
+    CHECK(strstr(o, "[MC] DC1 DC1 live @1,@2") != NULL);
+    CHECK(strstr(o, "[MC] DC6 DC6 live @11,@12") != NULL);
     CHECK(strstr(o, "fe=7 ne=1 overruns=0 dma_restarts=2") != NULL);
 
     fake_out_clear(PC);
@@ -718,7 +857,7 @@ static void test_sup_quarantine_and_degraded_broadcast(void)
     pump(5);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k)
         CHECK(strstr(fake_out(DC(k)), "start_sweep\r\n") != NULL);
-    CHECK(strstr(pc_out(), "sent to") == NULL);
+    CHECK(strstr(pc_out(), "of 6 DataControllers") == NULL);
 }
 
 static void test_sup_probe_backoff_doubles(void)
@@ -942,6 +1081,9 @@ int main(void)
     RUN(test_mc_recover_command);
     RUN(test_dc_binary_frames_dropped);
     RUN(test_health_events);
+    RUN(test_absent_and_lost_refusal);
+    RUN(test_refusals_each_get_a_reply);
+    RUN(test_dc_status_command);
     RUN(test_status_and_local_commands);
     RUN(test_tx_stall_recovers);
     RUN(test_pc_congestion_keeps_mc_replies);
