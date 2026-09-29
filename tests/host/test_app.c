@@ -11,6 +11,7 @@
 static void pump(int n) { while (n-- > 0) mc_app_poll(); }
 static void stall_cycles(int n);
 static const char *pc_out(void);
+static const char *status_of(void);
 
 /* Fresh app with every DataController already talking, boot noise cleared. */
 static void boot(void)
@@ -594,6 +595,64 @@ static void test_absent_and_lost_refusal(void)
     CHECK(strstr(fake_out(DC(3)), "@1 get volt\r\n") != NULL);
 }
 
+static void test_dc_pacing(void)
+{
+    boot();
+    fake_inject(PC, "mc_pace 5\r\n");
+    pump(20);
+    CHECK(strstr(pc_out(), "[MC] I: DataController pacing 5 ms between lines (all)") != NULL);
+
+    /* Three lines at once: one goes now, the next only after the gap. */
+    fake_inject(PC, "@1 a\r\n@1 b\r\n@1 c\r\n");
+    pump(20);
+    CHECK_STR(fake_out(DC(1)), "@1 a\r\n");
+    fake_advance(4);
+    pump(5);
+    CHECK_STR(fake_out(DC(1)), "@1 a\r\n");                /* still inside the gap */
+    fake_advance(1);
+    pump(5);
+    CHECK_STR(fake_out(DC(1)), "@1 a\r\n@1 b\r\n");
+
+    /* A stop never waits for the gap, and goes ahead of what is queued. */
+    fake_inject(PC, "@2 stop\r\n");
+    pump(5);
+    CHECK_STR(fake_out(DC(1)), "@1 a\r\n@1 b\r\n@2 stop\r\n");
+    fake_advance(5);
+    pump(5);
+    CHECK_STR(fake_out(DC(1)), "@1 a\r\n@1 b\r\n@2 stop\r\n@1 c\r\n");
+
+    /* Per-DataController setting, report, and validation. */
+    fake_inject(PC, "mc_pace 2 20\r\nmc_pace\r\nmc_pace 7 3\r\nmc_pace 999\r\n");
+    pump(100);
+    CHECK(strstr(pc_out(), "[MC] I: DC2 pacing 20 ms between lines") != NULL);
+    CHECK(strstr(pc_out(), "[MC] pacing: DC1=5ms DC2=20ms DC3=5ms DC4=5ms DC5=5ms DC6=5ms") != NULL);
+    CHECK(strstr(pc_out(), "[MC] E: usage: mc_pace [1..6] <0..100 ms>") != NULL);
+    CHECK(strstr(pc_out(), "[MC] E: pacing must be 0..100 ms") != NULL);
+    CHECK(strstr(status_of(), "quarantines=0 pace=20ms") != NULL);
+
+    /* Off again: back-to-back at full rate. */
+    fake_inject(PC, "mc_pace 0\r\n");
+    pump(20);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k) fake_out_clear(DC(k));
+    fake_inject(PC, "@3 x\r\n@3 y\r\n@3 z\r\n");
+    pump(10);
+    CHECK_STR(fake_out(DC(2)), "@1 x\r\n@1 y\r\n@1 z\r\n");
+}
+
+/* The ST-LINK VCP is a second command input, routed like the laptop link. */
+static void test_vcp_accepts_commands(void)
+{
+    boot();
+    fake_inject(MC_PORT_DBG, "#3 hello_from_vcp\r\n@5 ping\r\n");
+    pump(20);
+    CHECK_STR(fake_out(DC(3)), "hello_from_vcp\r\n@1 ping\r\n");
+    fake_inject(MC_PORT_DBG, "dc_status\r\n");
+    pump(100);
+    CHECK(strstr(fake_out(MC_PORT_DBG), "[MC] dc_status: 6 live, 0 absent, 0 lost") != NULL);
+    for (unsigned k = 1; k <= MC_NUM_DC; ++k)
+        CHECK(strstr(fake_out(DC(k)), "dc_status") == NULL);
+}
+
 static void test_refusals_each_get_a_reply(void)
 {
     char line[32];
@@ -1082,6 +1141,8 @@ int main(void)
     RUN(test_dc_binary_frames_dropped);
     RUN(test_health_events);
     RUN(test_absent_and_lost_refusal);
+    RUN(test_vcp_accepts_commands);
+    RUN(test_dc_pacing);
     RUN(test_refusals_each_get_a_reply);
     RUN(test_dc_status_command);
     RUN(test_status_and_local_commands);

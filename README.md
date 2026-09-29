@@ -28,7 +28,15 @@ unchanged and sees exactly the traffic it would get from a laptop today.
 | DC4 → EVS2 @7, @8 | UART5 | PB13 | PB12 | 57600 |
 | DC5 → EVS2 @9, @10 | UART9 | PD15 | PD14 | 57600 |
 | DC6 → EVS2 @11, @12 | USART6 | PC6 | PC7 | 57600 |
-| Diagnostics (read-only) | USART3 | PD8 | PD9 | 115200 (ST-LINK USB VCP) |
+| Diagnostics + commands | USART3 | PD8 | PD9 | 115200 (ST-LINK USB VCP, no wiring) |
+
+**Soldering to the morpho through-holes (CN11/CN12)?** Open
+[docs/Morpho_wiring_guide.html](docs/Morpho_wiring_guide.html). It shows
+the exact holes for every link, taken from ST UM2408 Table 19, with a
+top/solder-side toggle and a continuity checklist.
+- Arduino labels are not the MCU pin names: **A0 is PA3, not PA0**.
+- **DC4's TX (PB13) is not on the morpho rows on a stock board.** CN12-30
+  carries PE8 by default. Take PB13 from Zio **CN7 pin 5 (D18)**.
 
 For each DataController, the MC's **TX** pin goes to the F401's USART1 **RX
 (PA10)**, and the F401's USART1 **TX (PA9)** goes to the MC's **RX** pin.
@@ -260,6 +268,25 @@ never happen in practice.
 | `mc_status` | Uptime, reset cause, worst main-loop time, then one line per port: live/absent/lost, time since last byte, bytes/lines, queue depth, drops, framing/noise errors, DMA restarts, TX stalls, `health=` state (with the fault reason), recoveries and quarantines |
 | `mc_reset_stats` | Zero all counters |
 | `mc_recover <1..6\|pc\|all>` | Rebuild a port now, or probe a faulted port now |
+| `mc_pace [1..6] <0..100>` | Quiet gap (ms) after each line sent to a DataController: all six, or one. `mc_pace` alone lists them. |
+
+### Pacing towards the DataControllers
+
+By default the MC sends queued lines to a DataController back to back, at
+the full 57600 line rate. That is the heaviest load an F401 sees: it
+handles one line per main-loop pass and adds its own `TX to ESV2-n` echo
+and `[ESV2-n]` prefixes towards the MC.
+
+`mc_pace` adds a quiet gap after each line, per DataController.
+- **Stops are never delayed.** `stop`, `cancel`, `@0 stop_all` and the CRLF
+  that ends an aborted line never wait for the gap.
+- **The gap is shown per port** as `pace=` in `mc_status`.
+- **The default is 0.** It is set in RAM only, so it resets at boot. The
+  compile-time default is `MC_DC_LINE_GAP_MS`.
+- **Measured on the bench:** 20 ms gives 19.5 ms per line and 50 ms gives
+  50.0 ms per line, with short lines.
+- **Choosing a value:** tune it during end-to-end tests with real F401s by
+  watching their drop and bad-frame counters.
 
 Unsolicited `[MC]` lines:
 - A boot banner that includes the reset cause (`POWER_ON`, `WATCHDOG`,
@@ -273,6 +300,16 @@ Unsolicited `[MC]` lines:
 Every `[MC]` line is also mirrored to the **ST-LINK virtual COM port**
 (USB, 115200). You can watch it in a terminal without disturbing the GUI
 link.
+
+The ST-LINK port also **accepts commands**, exactly like the laptop link.
+Any line typed there is routed the same way, for example `dc_status`,
+`#3 test` or `@5 get volt`. It is a backup way in, and it needs no wiring:
+just the Nucleo's USB cable. Replies from the DataControllers still go to
+the laptop link; the ST-LINK port gets only the `[MC]` lines.
+
+Like every other port, it receives through circular DMA (DMA2 Stream0),
+never one byte per interrupt. CubeMX uses DMA1 only; if DMA2 Stream0 is
+ever assigned in the `.ioc`, move the VCP stream in `mc_platform.c`.
 
 ## LEDs and button
 

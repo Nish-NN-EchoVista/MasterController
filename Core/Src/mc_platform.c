@@ -10,7 +10,8 @@
  *   4  DC4   UART5    PB13 / PB12   57600    EVS2 @7,  @8
  *   5  DC5   UART9    PD15 / PD14   57600    EVS2 @9,  @10
  *   6  DC6   USART6   PC6  / PC7    57600    EVS2 @11, @12
- *   7  DBG   USART3   PD8  / PD9    115200   ST-LINK VCP, diagnostics only
+ *   7  DBG   USART3   PD8  / PD9    115200   ST-LINK VCP: diagnostics out,
+ *                                            commands in (like the PC link)
  *
  * Receive: each port's RX DMA stream (configured circular by CubeMX) is
  * started directly on the peripheral, never through HAL_UART_Receive_DMA.
@@ -19,6 +20,12 @@
  * as flags that the main loop counts and clears while DMA keeps running.
  * The CubeMX setting "DMA disable on RX error" is also switched off here.
  * If a stream is ever found disabled it is restarted and counted.
+ *
+ * The ST-LINK VCP (USART3) belongs to the BSP and has no CubeMX DMA stream;
+ * it gets DMA2 Stream0 here, set up the same way (circular, no interrupts),
+ * so every receiving port works identically: no per-byte interrupts
+ * anywhere. CubeMX uses DMA1 only; if DMA2 Stream0 is ever assigned in the
+ * .ioc, move this one.
  *
  * Transmit: HAL_UART_Transmit_IT with the 16-byte FIFO enabled. The
  * completion interrupt only clears a busy flag; queues live in mc_app.c.
@@ -66,6 +73,30 @@ static uint8_t rx_pc[PC_RX_BYTES] __attribute__((aligned(32)));
 static uint8_t rx_dc[MC_NUM_DC][DC_RX_BYTES] __attribute__((aligned(32)));
 
 static plat_port_t P[MC_NUM_PORTS];
+
+/* ST-LINK VCP receive: circular DMA like every other port (~355 ms of
+   continuous input at 115200).                                           */
+#define VCP_RX_BYTES  4096u
+static uint8_t           rx_vcp[VCP_RX_BYTES] __attribute__((aligned(32)));
+static DMA_HandleTypeDef hdma_vcp_rx;
+
+static void vcp_dma_init(void)
+{
+    __HAL_RCC_DMA2_CLK_ENABLE();
+    hdma_vcp_rx.Instance                 = DMA2_Stream0;
+    hdma_vcp_rx.Init.Request             = DMA_REQUEST_USART3_RX;
+    hdma_vcp_rx.Init.Direction           = DMA_PERIPH_TO_MEMORY;
+    hdma_vcp_rx.Init.PeriphInc           = DMA_PINC_DISABLE;
+    hdma_vcp_rx.Init.MemInc              = DMA_MINC_ENABLE;
+    hdma_vcp_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_vcp_rx.Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
+    hdma_vcp_rx.Init.Mode                = DMA_CIRCULAR;
+    hdma_vcp_rx.Init.Priority            = DMA_PRIORITY_MEDIUM;
+    hdma_vcp_rx.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_vcp_rx) != HAL_OK)
+        mc_board_fatal(MC_FAULT_DMA);
+    __HAL_LINKDMA(&hcom_uart[COM1], hdmarx, hdma_vcp_rx);
+}
 static uint8_t     ready;
 static char        reset_cause[24];
 static uint32_t    last_poll_ms;
@@ -398,7 +429,8 @@ void mc_board_init(void)
     port_setup(MC_PORT_DC(4), &huart5,  "UART5 PB13/PB12",  rx_dc[3], DC_RX_BYTES);
     port_setup(MC_PORT_DC(5), &huart9,  "UART9 PD15/PD14",  rx_dc[4], DC_RX_BYTES);
     port_setup(MC_PORT_DC(6), &huart6,  "USART6 PC6/PC7",   rx_dc[5], DC_RX_BYTES);
-    port_setup(MC_PORT_DBG,   &hcom_uart[COM1], "USART3 ST-LINK VCP", NULL, 0);
+    vcp_dma_init();
+    port_setup(MC_PORT_DBG,   &hcom_uart[COM1], "USART3 ST-LINK VCP", rx_vcp, VCP_RX_BYTES);
     HAL_NVIC_SetPriority(USART3_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(USART3_IRQn);
 

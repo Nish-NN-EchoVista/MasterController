@@ -67,6 +67,15 @@
    aborted and counted as a stall.                                            */
 #define MC_TX_STALL_MARGIN_MS  100u
 
+/* ---- Pacing towards the DataControllers --------------------------------- */
+/* Optional quiet gap after each line sent to a DataController, before the
+   next one starts. The F401 handles one line per main-loop pass and adds
+   its own echo/prefix traffic towards the MasterController, so back-to-back
+   lines at full line rate are its heaviest load. 0 = no gap (full rate).
+   Adjustable at run time with mc_pace; urgent lines never wait.            */
+#define MC_DC_LINE_GAP_MS      0u
+#define MC_DC_LINE_GAP_MAX_MS  100u
+
 /* ---- Port health supervisor -------------------------------------------- */
 /* Escalation ladder per port (see mc_app.c):
      OK --hard fault--> reinit UART, PROBATION

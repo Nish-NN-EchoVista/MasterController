@@ -81,6 +81,9 @@ typedef struct {
     uint32_t      probation_until_ms, probation_tx_base;
     uint32_t      next_probe_ms, backoff_ms;
     uint32_t      recoveries, quarantines;
+    /* Pacing (DataController ports): quiet gap between lines.             */
+    uint32_t      pace_ms;
+    uint32_t      tx_done_ms;   /* when the last line finished sending       */
 } port_t;
 
 /* Rate-limited repeated event: the first occurrence is reported at once,
@@ -242,6 +245,8 @@ static void resync_after_loss(unsigned port, uint32_t now)
 }
 
 static int is_dc_port(unsigned port) { return port >= 1u && port <= MC_NUM_DC; }
+/* Ports that accept commands: the laptop link and the ST-LINK VCP. */
+static int is_cmd_port(unsigned port) { return port == MC_PORT_PC || port == MC_PORT_DBG; }
 static int dc_faulted(unsigned k)    { return dc(k)->health == H_FAULTED; }
 
 static const char *health_name(uint8_t h)
@@ -252,7 +257,7 @@ static const char *health_name(uint8_t h)
 
 static const char *port_label(unsigned port)
 {
-    static const char *n[MC_NUM_PORTS] = { "PC", "DC1", "DC2", "DC3", "DC4", "DC5", "DC6", "DBG" };
+    static const char *n[MC_NUM_PORTS] = { "PC", "DC1", "DC2", "DC3", "DC4", "DC5", "DC6", "VCP" };
     return port < MC_NUM_PORTS ? n[port] : "?";
 }
 
@@ -804,7 +809,7 @@ static void report_status(uint32_t now)
         emit("DC%u %s %s @%u,@%u last_rx=%s rx=%lu lines=%lu up_drop=%lu tx=%lu q=%u/%u "
              "rejected=%lu purged=%lu overlong=%lu binary=%lu fe=%lu ne=%lu "
              "overruns=%lu dma_restarts=%lu stalls=%lu health=%s%s%s%s "
-             "recoveries=%lu quarantines=%lu",
+             "recoveries=%lu quarantines=%lu pace=%lums",
              k, mc_plat_port_name(MC_PORT_DC(k)), presence_name(dc_presence(k, now)),
              2u * k - 1u, 2u * k, age,
              (unsigned long)p->c.rx_bytes, (unsigned long)p->c.rx_lines,
@@ -818,7 +823,8 @@ static void report_status(uint32_t now)
              p->health != H_OK ? "(" : "",
              p->health != H_OK && p->fault_reason ? p->fault_reason : "",
              p->health != H_OK ? ")" : "",
-             (unsigned long)p->recoveries, (unsigned long)p->quarantines);
+             (unsigned long)p->recoveries, (unsigned long)p->quarantines,
+             (unsigned long)p->pace_ms);
     }
 }
 
@@ -835,6 +841,64 @@ static void reset_stats(uint32_t now)
     loop_max_ms = 0;
     had_drop = 0;
     (void)now;
+}
+
+/* Parse an unsigned decimal; returns 1 and sets *v on success. */
+static int parse_uint(const char *s, size_t n, uint32_t *v)
+{
+    uint32_t x = 0;
+    if (!n || n > 6u) return 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        x = x * 10u + (uint32_t)(s[i] - '0');
+    }
+    *v = x;
+    return 1;
+}
+
+/* mc_pace                 report the gap of every DataController
+   mc_pace <ms>            set it for all six
+   mc_pace <1..6> <ms>     set it for one                                  */
+static void handle_pace(const char *a, size_t n)
+{
+    const char *sp = memchr(a, ' ', n);
+    uint32_t k = 0, ms = 0;
+    unsigned first = 1, last = MC_NUM_DC;
+    if (n == 0u) {
+        char list[80];
+        size_t w = 0;
+        list[0] = '\0';
+        for (unsigned d = 1; d <= MC_NUM_DC; ++d) {
+            int r = snprintf(list + w, sizeof list - w, "%sDC%u=%lums", d > 1u ? " " : "", d,
+                             (unsigned long)dc(d)->pace_ms);
+            if (r > 0 && (size_t)r < sizeof list - w) w += (size_t)r;
+        }
+        emit("pacing: %s", list);
+        return;
+    }
+    if (sp) {
+        if (!parse_uint(a, (size_t)(sp - a), &k) || k < 1u || k > MC_NUM_DC ||
+            !parse_uint(sp + 1, n - (size_t)(sp - a) - 1u, &ms)) {
+            emit("E: usage: mc_pace [1..%u] <0..%u ms>", (unsigned)MC_NUM_DC,
+                 (unsigned)MC_DC_LINE_GAP_MAX_MS);
+            return;
+        }
+        first = last = (unsigned)k;
+    } else if (!parse_uint(a, n, &ms)) {
+        emit("E: usage: mc_pace [1..%u] <0..%u ms>", (unsigned)MC_NUM_DC,
+             (unsigned)MC_DC_LINE_GAP_MAX_MS);
+        return;
+    }
+    if (ms > MC_DC_LINE_GAP_MAX_MS) {
+        emit("E: pacing must be 0..%u ms", (unsigned)MC_DC_LINE_GAP_MAX_MS);
+        return;
+    }
+    for (unsigned d = first; d <= last; ++d)
+        dc(d)->pace_ms = ms;
+    if (first == last)
+        emit("I: DC%u pacing %lu ms between lines", first, (unsigned long)ms);
+    else
+        emit("I: DataController pacing %lu ms between lines (all)", (unsigned long)ms);
 }
 
 static void handle_local(const char *line, uint16_t len)
@@ -871,12 +935,15 @@ static void handle_local(const char *line, uint16_t len)
         } else {
             emit("E: usage: mc_recover <1..%u|pc|all>", (unsigned)MC_NUM_DC);
         }
+    } else if (IS("mc_pace") || (len > 8u && memcmp(line, "mc_pace ", 8) == 0)) {
+        handle_pace(line + (len > 8u ? 8 : len), len > 8u ? (size_t)(len - 8u) : 0u);
     } else if (IS("mc_help")) {
         emit("@1..@12 <cmd>: one EVS2 | #1..#6 <cmd>: one DataController | "
              "<cmd>: all six DataControllers");
         emit("stop, cancel, @0 stop_all: sent ahead of queued lines, which are discarded");
         emit("dc_status mc_status mc_version mc_ping mc_reset_stats "
-             "mc_recover <1..6|pc|all> mc_help");
+             "mc_recover <1..6|pc|all> mc_pace [1..6] <0..%u ms> mc_help",
+             (unsigned)MC_DC_LINE_GAP_MAX_MS);
     } else {
         emit("E: unknown MasterController command: %.*s", clip(len), line);
     }
@@ -909,9 +976,14 @@ static void service_tx(unsigned port, uint32_t now)
         ++p->tx_ok;
         p->c.tx_bytes += done->len;
         mc_txq_pop(&p->txq);
+        p->tx_done_ms = now;
     }
     const mc_slot_t *next = mc_txq_head(&p->txq);
     if (!next)
+        return;
+    /* Pacing: wait out the gap after the previous line, unless this one is
+       urgent (stop, cancel, or the CRLF that ends an aborted line).       */
+    if (p->pace_ms && !next->urgent && elapsed(now, p->tx_done_ms) < p->pace_ms)
         return;
     if (!mc_plat_tx_start(port, next->data, next->len)) {
         if (port != MC_PORT_DBG)
@@ -986,7 +1058,7 @@ static void service_rx(unsigned port, uint32_t now)
         mc_plat_hw_stats(port, &hw);            /* after the read: see above */
         if (line_errors(&hw) != p->err_seen) {
             p->err_seen = line_errors(&hw);
-            if (port == MC_PORT_PC)
+            if (is_cmd_port(port))
                 taint_received(p, port, now);
         }
         if (hw.rx_overruns != p->overrun_seen || hw.rx_restarts != p->restart_seen) {
@@ -999,7 +1071,7 @@ static void service_rx(unsigned port, uint32_t now)
                 p->discont_armed = 1;
                 p->discont_ms = now;
                 emit("W: %s input lost (%s); discarding up to the next line end",
-                     port == MC_PORT_PC ? "PC" : mc_plat_port_name(port),
+                     is_cmd_port(port) ? port_label(port) : mc_plat_port_name(port),
                      restarted ? "receive DMA restarted" : "main loop stalled, buffer overflowed");
             }
         }
@@ -1032,7 +1104,7 @@ static void service_rx(unsigned port, uint32_t now)
                 uint32_t start = p->boundary;   /* line began after this */
                 p->boundary = p->rx_pos;
                 ++p->c.rx_lines;
-                if (port != MC_PORT_PC) {
+                if (!is_cmd_port(port)) {
                     handle_dc_line(port, p->line.buf, p->line.len, now);
                 } else if (line_tainted(p, start, p->line_first_ms)) {
                     ++p->c.tainted;
@@ -1047,11 +1119,11 @@ static void service_rx(unsigned port, uint32_t now)
             } else if (e == MC_LINE_OVERLONG) {
                 ++p->c.overlong;
                 note_drop(now);
-                if (port == MC_PORT_PC && ratelimit_hit(&rl_pc_overlong, now))
+                if (is_cmd_port(port) && ratelimit_hit(&rl_pc_overlong, now))
                     emit("E: line longer than %u characters discarded", (unsigned)MC_LINE_MAX);
             } else if (e == MC_LINE_BINARY) {
                 ++p->c.binary;
-                if (port == MC_PORT_PC && ratelimit_hit(&rl_pc_binary, now))
+                if (is_cmd_port(port) && ratelimit_hit(&rl_pc_binary, now))
                     emit("E: binary protocol frames are not supported by the "
                          "MasterController, frame discarded");
             }
@@ -1165,6 +1237,8 @@ void mc_app_init(void)
         ports[i].storm_err_base = line_errors(&hw);
         ports[i].storm_start_ms = boot_ms;
         ports[i].strike_start_ms = boot_ms;
+        if (is_dc_port(i))
+            ports[i].pace_ms = MC_DC_LINE_GAP_MS;
     }
 
     emit("MasterController %s ready (reset: %s). %u DataControllers, EVS2 @1..@%u. "
@@ -1178,6 +1252,8 @@ void mc_app_poll(void)
 
     /* Receive first so freshly queued lines go out in this same pass. */
     service_rx(MC_PORT_PC, now);
+    if (mc_plat_port_present(MC_PORT_DBG))
+        service_rx(MC_PORT_DBG, now);        /* ST-LINK VCP: second command input */
     for (unsigned k = 1; k <= MC_NUM_DC; ++k)
         service_rx(MC_PORT_DC(k), now);
 

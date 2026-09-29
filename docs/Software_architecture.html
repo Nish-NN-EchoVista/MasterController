@@ -375,7 +375,7 @@
         <li><b>921 600</b> baud up · <b>57 600</b> baud down</li>
         <li><b>@1…@12</b> EVS2 addressing</li>
         <li><b>self-healing</b> UART ports</li>
-        <li><b>467</b> host test checks</li>
+        <li><b>487</b> host test checks</li>
         <li><b>0–6</b> DataControllers, hot-pluggable</li>
         <li>v<b>1.0.0</b> · main</li>
       </ul>
@@ -469,7 +469,7 @@
             <tr><td class="num"><code>4</code></td><td>DC4 → EVS2 @7, @8</td><td>UART5</td><td><code>PB13</code></td><td><code>PB12</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
             <tr><td class="num"><code>5</code></td><td>DC5 → EVS2 @9, @10</td><td>UART9</td><td><code>PD15</code></td><td><code>PD14</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
             <tr><td class="num"><code>6</code></td><td>DC6 → EVS2 @11, @12</td><td>USART6</td><td><code>PC6</code></td><td><code>PC7</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
-            <tr><td class="num"><code>7</code></td><td>Diagnostics mirror (TX only)</td><td>USART3</td><td><code>PD8</code></td><td><code>PD9</code></td><td class="num">115 200</td><td>—</td></tr>
+            <tr><td class="num"><code>7</code></td><td>Diagnostics mirror + backup command input</td><td>USART3</td><td><code>PD8</code></td><td><code>PD9</code></td><td class="num">115 200</td><td class="num">4 KB · DMA2</td></tr>
           </tbody>
         </table>
       </div>
@@ -541,7 +541,7 @@
         <div class="lane isr">
           <h4>Interrupt &amp; DMA context <span>minimal by design</span></h4>
           <ul>
-            <li><strong>RX DMA:</strong> circular, byte-wide and interrupt-free. The main loop reads the DMA counter to find new data.</li>
+            <li><strong>RX DMA:</strong> circular, byte-wide and interrupt-free on all eight UARTs (DMA1 Streams 0–6 from CubeMX, DMA2 Stream0 for the ST-LINK port). No port ever receives one byte per interrupt. The main loop reads the DMA counter to find new data.</li>
             <li><strong>UART IRQ:</strong> the HAL TX routine refills the FIFO 8 bytes at a time. Error interrupts are deliberately left off, so a framing error can never abort reception.</li>
             <li><strong>TX complete:</strong> <code>HAL_UART_TxCpltCallback</code> clears the port's busy flag, and nothing else.</li>
             <li><strong>Button:</strong> the EXTI callback sets a flag that requests a status report.</li>
@@ -690,7 +690,7 @@
             <line class="lw" x1="810" y1="190" x2="810" y2="130" marker-end="url(#ah4)"/>
 
             <rect class="b" x="950" y="190" width="190" height="62" rx="8"/>
-            <text class="t" x="1045" y="215" text-anchor="middle">Diagnostics mirror</text>
+            <text class="t" x="1045" y="215" text-anchor="middle">Mirror + commands</text>
             <text class="tm" x="1045" y="236" text-anchor="middle">USART3 · ST-LINK VCP</text>
             <line class="lw" x1="905" y1="221" x2="948" y2="221" marker-end="url(#ah4)"/>
 
@@ -1044,7 +1044,7 @@
     <!-- ===================================================== 12 -->
     <section id="observe">
       <div class="sec-head"><span class="sec-no">12</span><h2>Observability</h2></div>
-      <p class="sec-intro">Everything the MasterController says begins with <code>[MC] </code>, so the GUI can log it or ignore it. The same lines are mirrored to the ST-LINK USB serial port at 115 200 baud, so they can be watched without touching the laptop link.</p>
+      <p class="sec-intro">Everything the MasterController says begins with <code>[MC] </code>, so the GUI can log it or ignore it. The same lines are mirrored to the ST-LINK USB serial port at 115 200 baud, so they can be watched without touching the laptop link. That port also accepts commands exactly like the laptop link, as a backup way in that needs no wiring.</p>
 <pre class="term"><span class="p">&gt;</span> <span class="a">mc_status</span>
 <span class="c">[MC] status up=412s reset=POWER_ON loop_max=0ms mc_lost=0 busy=0</span>
 <span class="c">[MC] PC  USART2 PA2/PA3 921600 baud rx=18344 lines=611 tx=5210 q=0/256 overlong=0 binary=0 garbled=0 uart_err_lines=0 fe=0 ne=0 overruns=0 stalls=0 health=OK recoveries=0</span>
@@ -1061,7 +1061,7 @@
 <span class="w">[MC]   lost   DC4 (port 4, UART5 PB13/PB12, @7,@8) silent for 42 s</span></pre>
       <p class="stack-note">Sample output for illustration, not captured from a board.</p>
       <div class="grid2">
-        <div class="card"><span class="k">Commands</span><h4><code>dc_status</code> · <code>mc_status</code> · <code>mc_ping</code> · <code>mc_version</code> · <code>mc_reset_stats</code> · <code>mc_recover</code> · <code>mc_help</code></h4><p>A status report has one summary line and one line per port. Every counter and each port's <code>health=</code> state are listed, so the commissioning script can require each counter to be zero and every port to be OK.</p></div>
+        <div class="card"><span class="k">Commands</span><h4><code>dc_status</code> · <code>mc_status</code> · <code>mc_ping</code> · <code>mc_version</code> · <code>mc_reset_stats</code> · <code>mc_recover</code> · <code>mc_pace</code> · <code>mc_help</code></h4><p>A status report has one summary line and one line per port. Every counter and each port's <code>health=</code> state are listed, so the commissioning script can require each counter to be zero and every port to be OK.</p></div>
         <div class="card"><span class="k">On the board</span><h4>LEDs &amp; button</h4><p><span class="pill ok">green</span> 1 Hz heartbeat · <span class="pill warn">yellow</span> traffic · <span class="pill crit">red</span> a DataController lost (absent ones don't count), a port not healthy, or a drop in the last 2 s. The blue button prints a full <code>mc_status</code> report.</p></div>
       </div>
     </section>
@@ -1071,7 +1071,7 @@
       <div class="sec-head"><span class="sec-no">13</span><h2>Verification</h2></div>
       <p class="sec-intro">Because the platform contract is so small, the same application code runs in three places: on the board, against a scripted fake, and inside a real-time simulator.</p>
       <div class="grid3">
-        <div class="card"><span class="k">tests/host · C</span><h4>Unit &amp; app tests</h4><p>467 checks. <code>test_core</code> covers the queue, line builder and router. <code>test_app</code> covers the full application against the fake, with injected stalls, refusals, UART errors, DMA restarts and failures, overruns and congestion. It walks every step of the recovery ladder, including quarantine, backoff, recovery and the board reset. Built with <code>-Werror -Wconversion</code>.</p></div>
+        <div class="card"><span class="k">tests/host · C</span><h4>Unit &amp; app tests</h4><p>487 checks. <code>test_core</code> covers the queue, line builder and router. <code>test_app</code> covers the full application against the fake, with injected stalls, refusals, UART errors, DMA restarts and failures, overruns and congestion. It walks every step of the recovery ladder, including quarantine, backoff, recovery and the board reset. Built with <code>-Werror -Wconversion</code>.</p></div>
         <div class="card"><span class="k">tests/host · mc_sim</span><h4>Simulator</h4><p>The real core behind a TCP socket, with DataController ports looped back and wire time emulated at each port's baud rate. It speaks to pyserial as <code>socket://localhost:5555</code>.</p></div>
         <div class="card"><span class="k">tools · Python</span><h4>Loopback commissioning</h4><p>With TX-to-RX jumpers on each DataController port, it checks every route, broadcast atomicity, burst ordering and stop behavior, and requires a complete status report with every loss counter at zero. It also requires every port to report <code>health=OK</code>. A self-test with 15 cases confirms it fails when the report is bad.</p></div>
       </div>
@@ -1094,6 +1094,7 @@
             <tr><td><code>MC_BIN_FRAME_MAX</code></td><td class="num">160</td><td>Beyond this, a "frame" with no closing 0x00 is treated as noise</td></tr>
             <tr><td><code>MC_DC_SILENT_MS</code></td><td class="num">3000</td><td>Silence after which a live DataController becomes lost</td></tr>
             <tr><td><code>MC_STARTUP_GRACE_MS</code></td><td class="num">3000</td><td>Time after boot before the one-line live/absent summary</td></tr>
+            <tr><td><code>MC_DC_LINE_GAP_MS</code></td><td class="num">0</td><td>Default quiet gap after each line sent to a DataController; change at run time with <code>mc_pace</code>. Urgent lines never wait.</td></tr>
             <tr><td><code>MC_REPLY_BURST</code></td><td class="num">10</td><td>Refused commands per second that each get their own reply</td></tr>
             <tr><td><code>MC_WARN_INTERVAL_MS</code></td><td class="num">1000</td><td>Rate limit for repeated warnings</td></tr>
             <tr><td><code>MC_TAINT_GRACE_MS</code></td><td class="num">5</td><td>Window in which a line starting at the error point is also discarded</td></tr>
