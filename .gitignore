@@ -30,3 +30,6 @@ tests/host/mc_sim
 
 # Python bytecode
 __pycache__/
+
+# Local STM32CubeIDE project preferences
+.settings/stm32cubeide.project.prefs
