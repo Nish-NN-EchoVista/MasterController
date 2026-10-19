@@ -4,12 +4,12 @@
  *
  * Port map (TX / RX):
  *   0  PC    USART2   PA2  / PA3    921600   external USB-UART adapter
- *   1  DC1   USART10  PE3  / PE2    57600    EVS2 @1,  @2
- *   2  DC2   UART7    PF7  / PF6    57600    EVS2 @3,  @4
- *   3  DC3   UART4    PA0  / PA1    57600    EVS2 @5,  @6
- *   4  DC4   UART5    PB13 / PB12   57600    EVS2 @7,  @8
- *   5  DC5   UART9    PD15 / PD14   57600    EVS2 @9,  @10
- *   6  DC6   USART6   PC6  / PC7    57600    EVS2 @11, @12
+ *   1  DC1   USART10  PE3  / PE2    57600    EVS2 @1
+ *   2  DC2   UART7    PF7  / PF6    57600    EVS2 @2
+ *   3  DC3   UART4    PA0  / PA1    57600    EVS2 @3
+ *   4  DC4   UART5    PB13 / PB12   57600    EVS2 @4
+ *   5  DC5   UART9    PD15 / PD14   57600    EVS2 @5
+ *   6  DC6   USART6   PC6  / PC7    57600    EVS2 @6
  *   7  DBG   USART3   PD8  / PD9    115200   ST-LINK VCP: diagnostics out,
  *                                            commands in (like the PC link)
  *

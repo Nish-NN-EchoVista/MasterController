@@ -258,16 +258,16 @@ static void test_line_resync(void)
 static mc_route_t rt;
 static void route(const char *s) { mc_route_pc_line(s, (uint16_t)strlen(s), &rt); }
 
+#if MC_BOARDS_PER_DC == 1u
 static void test_route_boards(void)
 {
     static const struct { const char *in; unsigned dc; const char *prefix; uint8_t tag; } cases[] = {
         { "@1 start_sweep",  1, "@1 ", MC_TAG_BOARD1 },
-        { "@2 start_sweep",  1, "@2 ", MC_TAG_BOARD2 },
-        { "@3 start_sweep",  2, "@1 ", MC_TAG_BOARD1 },
-        { "@4 start_sweep",  2, "@2 ", MC_TAG_BOARD2 },
-        { "@9 start_sweep",  5, "@1 ", MC_TAG_BOARD1 },
-        { "@11 start_sweep", 6, "@1 ", MC_TAG_BOARD1 },
-        { "@12 start_sweep", 6, "@2 ", MC_TAG_BOARD2 },
+        { "@2 start_sweep",  2, "@1 ", MC_TAG_BOARD1 },
+        { "@3 start_sweep",  3, "@1 ", MC_TAG_BOARD1 },
+        { "@4 start_sweep",  4, "@1 ", MC_TAG_BOARD1 },
+        { "@5 start_sweep",  5, "@1 ", MC_TAG_BOARD1 },
+        { "@6 start_sweep",  6, "@1 ", MC_TAG_BOARD1 },
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
         route(cases[i].in);
@@ -278,14 +278,39 @@ static void test_route_boards(void)
         CHECK_MEM(rt.payload, rt.payload_len, "start_sweep");
         CHECK(!rt.urgent);
     }
-    route("@7 get freq extra args");
-    CHECK(rt.kind == MC_ROUTE_BOARD && rt.board == 7 && rt.dc == 4);
+    route("@4 get freq extra args");
+    CHECK(rt.kind == MC_ROUTE_BOARD && rt.board == 4 && rt.dc == 4);
     CHECK_MEM(rt.payload, rt.payload_len, "get freq extra args");
 }
+
+#else   /* two boards per DataController: @1..@12 */
+static void test_route_boards(void)
+{
+    static const struct { const char *in; unsigned dc; const char *prefix; uint8_t tag; } cases[] = {
+        { "@1 start_sweep",  1, "@1 ", MC_TAG_BOARD1 },
+        { "@2 start_sweep",  1, "@2 ", MC_TAG_BOARD2 },
+        { "@3 start_sweep",  2, "@1 ", MC_TAG_BOARD1 },
+        { "@9 start_sweep",  5, "@1 ", MC_TAG_BOARD1 },
+        { "@12 start_sweep", 6, "@2 ", MC_TAG_BOARD2 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        route(cases[i].in);
+        CHECK(rt.kind == MC_ROUTE_BOARD);
+        CHECK(rt.dc == cases[i].dc);
+        CHECK_STR(rt.prefix, cases[i].prefix);
+        CHECK(rt.tag == cases[i].tag);
+    }
+    route("@13 x");
+    CHECK(rt.kind == MC_ROUTE_INVALID);
+}
+#endif
 
 static void test_route_invalid_addresses(void)
 {
     static const char *bad[] = {
+#if MC_BOARDS_PER_DC == 1u
+        "@7 x", "@12 x",
+#endif
         "@13 x", "@99 x", "@100 x", "@1234 x", "@01 x", "@1", "@1 ", "@ 1 x",
         "@x", "@", "@1x start", "@0", "@00 x",
         "#0 x", "#7 x", "#1", "#1 ", "#", "#a x",
@@ -330,7 +355,11 @@ static void test_route_urgent(void)
     route("@0 stop_all");   CHECK(rt.kind == MC_ROUTE_BROADCAST && rt.urgent);
     route(" stop ");        CHECK(rt.urgent);
     route("@5 stop");       CHECK(rt.kind == MC_ROUTE_BOARD && rt.urgent && rt.tag == MC_TAG_BOARD1);
-    route("@6 cancel");     CHECK(rt.kind == MC_ROUTE_BOARD && rt.urgent && rt.tag == MC_TAG_BOARD2);
+#if MC_BOARDS_PER_DC == 1u
+    route("@6 cancel");     CHECK(rt.kind == MC_ROUTE_BOARD && rt.urgent && rt.dc == 6 && rt.tag == MC_TAG_BOARD1);
+#else
+    route("@6 cancel");     CHECK(rt.kind == MC_ROUTE_BOARD && rt.urgent && rt.dc == 3 && rt.tag == MC_TAG_BOARD2);
+#endif
     route("#2 stop");       CHECK(rt.kind == MC_ROUTE_DC && rt.urgent && rt.tag == MC_TAG_BOTH);
     route("#2 @0 stop_all");CHECK(rt.kind == MC_ROUTE_DC && rt.urgent);
     route("stopx");         CHECK(!rt.urgent);
@@ -341,17 +370,24 @@ static void test_route_urgent(void)
 static void test_retag(void)
 {
     static const struct { unsigned dc; const char *in, *out; } cases[] = {
-        { 1, "[ESV2-1] Evaporation Sweep Completed", "[ESV2-1] Evaporation Sweep Completed\r\n" },
-        { 1, "[ESV2-2] ok",                          "[ESV2-2] ok\r\n" },
-        { 2, "[ESV2-1] ok",                          "[ESV2-3] ok\r\n" },
+#if MC_BOARDS_PER_DC == 2u
         { 3, "[ESV2-2] ok",                          "[ESV2-6] ok\r\n" },
-        { 5, "[ESV2-1] IL_data 1,2,3",               "[ESV2-9] IL_data 1,2,3\r\n" },
+        { 6, "[ESV2-1] x",                           "[ESV2-11] x\r\n" },
         { 6, "[ESV2-2] x",                           "[ESV2-12] x\r\n" },
-        { 6, "[ESV2-1]",                             "[ESV2-11]\r\n" },
-        { 4, "TX to ESV2-1: start_sweep",            "TX to ESV2-7: start_sweep\r\n" },
         { 4, "TX to ESV2-2: start_sweep",            "TX to ESV2-8: start_sweep\r\n" },
-        { 6, "Board1 Temp: 25.1",                    "Board11 Temp: 25.1\r\n" },
         { 6, "Board2 Temp: 25.1",                    "Board12 Temp: 25.1\r\n" },
+#else
+        { 1, "[ESV2-1] Evaporation Sweep Completed", "[ESV2-1] Evaporation Sweep Completed\r\n" },
+        { 2, "[ESV2-1] ok",                          "[ESV2-2] ok\r\n" },
+        { 5, "[ESV2-1] IL_data 1,2,3",               "[ESV2-5] IL_data 1,2,3\r\n" },
+        { 6, "[ESV2-1]",                             "[ESV2-6]\r\n" },
+        { 4, "TX to ESV2-1: start_sweep",            "TX to ESV2-4: start_sweep\r\n" },
+        { 6, "Board1 Temp: 25.1",                    "Board6 Temp: 25.1\r\n" },
+        /* The F401's unused second board port is not one of our EVS2s. */
+        { 1, "[ESV2-2] ok",                          "[DC-1] [ESV2-2] ok\r\n" },
+        { 4, "TX to ESV2-2: start_sweep",            "[DC-4] TX to ESV2-2: start_sweep\r\n" },
+        { 6, "Board2 Temp: 25.1",                    "[DC-6] Board2 Temp: 25.1\r\n" },
+#endif
         { 3, "PZT Temp: 24.5 C",                     "[DC-3] PZT Temp: 24.5 C\r\n" },
         { 2, "[ESV2-0] upload_ack",                  "[DC-2] [ESV2-0] upload_ack\r\n" },
         { 1, "I: Pump enabled (PB12 gated by sequence)", "[DC-1] I: Pump enabled (PB12 gated by sequence)\r\n" },
@@ -372,8 +408,13 @@ static void test_retag_bounds(void)
     memset(line, 'q', sizeof line);
     /* Worst case fits a slot exactly or with room to spare. */
     CHECK(mc_retag_dc_line(6, line, sizeof line, out, sizeof out) == 7u + MC_LINE_MAX + 2u);
-    memcpy(line, "[ESV2-2]", 8);
+#if MC_BOARDS_PER_DC == 2u
+    memcpy(line, "[ESV2-2]", 8);                   /* -> "[ESV2-12]", one longer */
     CHECK(mc_retag_dc_line(6, line, sizeof line, out, sizeof out) == MC_LINE_MAX + 1u + 2u);
+#else
+    memcpy(line, "[ESV2-1]", 8);                   /* -> "[ESV2-6]", same length */
+    CHECK(mc_retag_dc_line(6, line, sizeof line, out, sizeof out) == MC_LINE_MAX + 2u);
+#endif
     /* Too small an output buffer is refused, not truncated. */
     CHECK(mc_retag_dc_line(1, "hello", 5, out, 8) == 0);
     CHECK(mc_retag_dc_line(1, "hello", 5, out, 14) == 14);
@@ -401,6 +442,7 @@ int main(void)
     RUN(test_route_urgent);
     RUN(test_retag);
     RUN(test_retag_bounds);
-    printf("\n%d checks, %d failures\n", mc_test_checks, mc_test_failures);
+    printf("\n%d checks, %d failures (%u EVS2 per DataController)\n",
+           mc_test_checks, mc_test_failures, (unsigned)MC_BOARDS_PER_DC);
     return mc_test_failures ? 1 : 0;
 }

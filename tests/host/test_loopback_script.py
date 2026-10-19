@@ -13,7 +13,7 @@ GOOD_ROWS = (
     ["[MC] status up=5s reset=X loop_max=0ms mc_lost=0 busy=0",
      "[MC] PC  P 921600 baud rx=1 lines=1 tx=1 q=0/256 overlong=0 binary=0 garbled=0 "
      "uart_err_lines=0 fe=0 ne=0 overruns=0 stalls=0 health=OK recoveries=0"]
-    + [f"[MC] DC{k} D online @1,@2 last_rx=1ms rx=1 lines=1 up_drop=0 tx=1 q=0/96 "
+    + [f"[MC] DC{k} D online @{k} last_rx=1ms rx=1 lines=1 up_drop=0 tx=1 q=0/96 "
        f"rejected=0 purged={28 if k == 1 else 0} overlong=0 binary=0 fe=0 ne=0 "
        f"overruns=0 dma_restarts=0 stalls=0 health=OK recoveries=0 quarantines=0"
        for k in range(1, 7)]

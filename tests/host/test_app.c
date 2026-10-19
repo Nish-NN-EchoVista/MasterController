@@ -62,15 +62,15 @@ static void test_boot_banner(void)
 static void test_board_routing(void)
 {
     boot();
-    fake_inject(PC, "@7 start_sweep\r\n");
+    fake_inject(PC, "@4 start_sweep\r\n");
     pump(5);
     CHECK_STR(fake_out(DC(4)), "@1 start_sweep\r\n");
     for (unsigned k = 1; k <= MC_NUM_DC; ++k)
         if (k != 4) CHECK(fake_out_len(DC(k)) == 0);
 
-    fake_inject(PC, "@12 get freq\n@1 get volt\r");  /* LF-only and CR-only */
+    fake_inject(PC, "@6 get freq\n@1 get volt\r");   /* LF-only and CR-only */
     pump(5);
-    CHECK_STR(fake_out(DC(6)), "@2 get freq\r\n");
+    CHECK_STR(fake_out(DC(6)), "@1 get freq\r\n");
     CHECK_STR(fake_out(DC(1)), "@1 get volt\r\n");
     CHECK(fake_out_len(PC) == 0);               /* no echo from the MC     */
 }
@@ -97,12 +97,13 @@ static void test_dc_raw_and_broadcast(void)
 static void test_invalid_rejected(void)
 {
     boot();
-    fake_inject(PC, "@13 start_sweep\r\n#9 x\r\nmc_nope\r\n");
+    fake_inject(PC, "@7 start_sweep\r\n#9 x\r\nmc_nope\r\n");
     pump(5);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k)
         CHECK(fake_out_len(DC(k)) == 0);
     CHECK(strstr(fake_out(PC), "[MC] E: invalid EVS2 address") != NULL);
-    CHECK(strstr(fake_out(PC), "@13 start_sweep") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] E: invalid EVS2 address (use @1..@6 <command>), not sent: @7 start_sweep") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] E: invalid DataController address (use #1..#6 <command>), not sent: #9 x") != NULL);
     CHECK(strstr(fake_out(PC), "[MC] E: invalid DataController address") != NULL);
     CHECK(strstr(fake_out(PC), "[MC] E: unknown MasterController command: mc_nope") != NULL);
 }
@@ -111,21 +112,21 @@ static void test_upstream_retag(void)
 {
     boot();
     fake_inject(DC(3), "[ESV2-1] hello\r\n[ESV2-2] world\r\nPZT Temp: 25.0 C\r\n");
-    fake_inject(DC(6), "TX to ESV2-2: start_sweep\r\nBoard1 Temp: 30\r\n");
+    fake_inject(DC(6), "TX to ESV2-1: start_sweep\r\nBoard1 Temp: 30\r\n");
     pump(20);
     const char *o = fake_out(PC);
-    CHECK(strstr(o, "[ESV2-5] hello\r\n") != NULL);
-    CHECK(strstr(o, "[ESV2-6] world\r\n") != NULL);
+    CHECK(strstr(o, "[ESV2-3] hello\r\n") != NULL);
+    CHECK(strstr(o, "[DC-3] [ESV2-2] world\r\n") != NULL);   /* unused F401 port */
     CHECK(strstr(o, "[DC-3] PZT Temp: 25.0 C\r\n") != NULL);
-    CHECK(strstr(o, "TX to ESV2-12: start_sweep\r\n") != NULL);
-    CHECK(strstr(o, "Board11 Temp: 30\r\n") != NULL);
+    CHECK(strstr(o, "TX to ESV2-6: start_sweep\r\n") != NULL);
+    CHECK(strstr(o, "Board6 Temp: 30\r\n") != NULL);
 }
 
 static int is_whole_tagged(const char *s, size_t n)
 {
     /* Each line must be one of the two complete test lines. */
     return (n == 40 && memcmp(s, "[ESV2-1] ", 9) == 0 && s[9] == 'a' && s[39] == 'a') ||
-           (n == 40 && memcmp(s, "[ESV2-4] ", 9) == 0 && s[9] == 'b' && s[39] == 'b');
+           (n == 40 && memcmp(s, "[ESV2-2] ", 9) == 0 && s[9] == 'b' && s[39] == 'b');
 }
 
 static void test_upstream_never_interleaves(void)
@@ -137,7 +138,7 @@ static void test_upstream_never_interleaves(void)
     /* Two DataControllers deliver their lines in small interleaved pieces. */
     for (int round = 0; round < 20; ++round) {
         fake_inject(DC(1), "[ESV2-1] ");
-        fake_inject(DC(2), "[ESV2-2] ");
+        fake_inject(DC(2), "[ESV2-1] ");
         pump(1);
         fake_inject(DC(1), a);
         pump(1);
@@ -155,12 +156,12 @@ static void test_broadcast_all_or_nothing(void)
 {
     boot();
     fake_tx_mode(DC(3), FAKE_TX_HOLD);
-    /* Fill DataController 3 exactly up to its reserve with @5 traffic. */
+    /* Fill DataController 3 exactly up to its reserve with @3 traffic. */
     char line[32];
     int accepted = 0;
     const int fill = (int)(MC_DC_TXQ_SLOTS - MC_TXQ_RESERVE);
     for (int i = 0; i < fill; ++i) {
-        snprintf(line, sizeof line, "@5 fill %d\r\n", i);
+        snprintf(line, sizeof line, "@3 fill %d\r\n", i);
         fake_inject(PC, line);
         pump(1);
     }
@@ -186,21 +187,26 @@ static void test_broadcast_all_or_nothing(void)
     CHECK(count_of(o, "@1 fill ") == (int)(MC_DC_TXQ_SLOTS - MC_TXQ_RESERVE));
 }
 
-static void test_stop_overtakes_and_purges_same_board(void)
+static void test_stop_overtakes_and_purges(void)
 {
     boot();
     fake_tx_mode(DC(2), FAKE_TX_HOLD);
-    fake_inject(PC, "@3 first\r\n");            /* goes on the wire        */
+    fake_tx_mode(DC(3), FAKE_TX_HOLD);
+    fake_inject(PC, "@2 first\r\n@3 other\r\n");   /* go on the wire     */
     pump(2);
-    fake_inject(PC, "@3 x1\r\n@4 y1\r\n@3 x2\r\n@4 y2\r\n#2 both\r\n");
+    fake_inject(PC, "@2 x1\r\n#2 both\r\n@2 x2\r\n@3 kept\r\n");
     pump(5);
     fake_out_clear(PC);
-    fake_inject(PC, "@3 stop\r\n");
+    fake_inject(PC, "@2 stop\r\n@2 after\r\n");
     pump(3);
     CHECK(strstr(fake_out(PC), "[MC] W: 'stop' discarded 3 queued line(s) for DC2") != NULL);
-    while (fake_complete(DC(2))) pump(1);
+    for (unsigned k = 2; k <= 3; ++k)
+        while (fake_complete(DC(k))) pump(1);
     pump(3);
-    CHECK_STR(fake_out(DC(2)), "@1 first\r\n@1 stop\r\n@2 y1\r\n@2 y2\r\n");
+    /* The line on the wire finishes; the stop overtakes the queue, and a
+       line sent after the stop still follows it. Other EVS2s unaffected. */
+    CHECK_STR(fake_out(DC(2)), "@1 first\r\n@1 stop\r\n@1 after\r\n");
+    CHECK_STR(fake_out(DC(3)), "@1 other\r\n@1 kept\r\n");
 }
 
 static void test_broadcast_stop_purges_everything(void)
@@ -209,7 +215,7 @@ static void test_broadcast_stop_purges_everything(void)
     for (unsigned k = 1; k <= MC_NUM_DC; ++k) fake_tx_mode(DC(k), FAKE_TX_HOLD);
     fake_inject(PC, "start_sweep\r\n");
     pump(2);                                    /* in flight everywhere    */
-    fake_inject(PC, "@1 a\r\n@2 b\r\n@11 c\r\nstart_defog\r\n");
+    fake_inject(PC, "@1 a\r\n@2 b\r\n@6 c\r\nstart_defog\r\n");
     pump(5);
     fake_inject(PC, "stop\r\n");
     pump(3);
@@ -230,12 +236,12 @@ static void test_later_stop_never_discards_earlier_stop(void)
     pump(2);
     fake_inject(PC, "@1 queued\r\n@0 stop_all\r\n");
     pump(2);
-    fake_inject(PC, "cancel\r\n@2 stop\r\n");
+    fake_inject(PC, "cancel\r\n@1 stop\r\n#1 cancel\r\n");
     pump(3);
     while (fake_complete(DC(1))) pump(1);
     pump(2);
     CHECK_STR(fake_out(DC(1)),
-              "@1 long_running_command\r\n@0 stop_all\r\ncancel\r\n@2 stop\r\n");
+              "@1 long_running_command\r\n@0 stop_all\r\ncancel\r\n@1 stop\r\ncancel\r\n");
 }
 
 static void test_stop_fits_even_when_queue_full(void)
@@ -243,20 +249,20 @@ static void test_stop_fits_even_when_queue_full(void)
     boot();
     fake_tx_mode(DC(1), FAKE_TX_HOLD);
     char line[32];
-    for (int i = 0; i < (int)MC_DC_TXQ_SLOTS; ++i) {  /* fill with board 2 */
-        snprintf(line, sizeof line, "@2 fill %d\r\n", i);
+    for (int i = 0; i < (int)MC_DC_TXQ_SLOTS; ++i) {  /* more than fits */
+        snprintf(line, sizeof line, "@1 fill %d\r\n", i);
         fake_inject(PC, line);
         pump(1);
     }
     fake_out_clear(PC);
-    fake_inject(PC, "@1 stop\r\n");             /* different board: no purge */
-    pump(2);
+    /* Several urgent lines in a row all fit, even though the queue was
+       full before the first of them purged it.                           */
+    fake_inject(PC, "@1 stop\r\n@0 stop_all\r\ncancel\r\n");
+    pump(3);
     CHECK(strstr(fake_out(PC), "NOT sent") == NULL);
-    fake_complete(DC(1));
+    while (fake_complete(DC(1))) pump(1);
     pump(2);
-    fake_complete(DC(1));
-    pump(2);
-    CHECK(strstr(fake_out(DC(1)), "@2 fill 0\r\n@1 stop\r\n") != NULL);
+    CHECK_STR(fake_out(DC(1)), "@1 fill 0\r\n@1 stop\r\n@0 stop_all\r\ncancel\r\n");
 }
 
 static int no_nul(const char *s, size_t n) { (void)s; (void)n; return 1; }
@@ -289,10 +295,10 @@ static void test_pc_garbage_never_forwarded(void)
     boot();
     /* A connect glitch glued onto the next command, plus a stray byte. */
     fake_inject(PC, "\xff" "start_sweep\r\n@3 get\x80" "freq\r\n");
-    fake_inject(PC, "start_sweep\r\n@4 get\tfreq\r\n");   /* tab is fine */
+    fake_inject(PC, "start_sweep\r\n@2 get\tfreq\r\n");   /* tab is fine */
     pump(10);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k)
-        CHECK_STR(fake_out(DC(k)), k == 2 ? "start_sweep\r\n@2 get\tfreq\r\n"
+        CHECK_STR(fake_out(DC(k)), k == 2 ? "start_sweep\r\n@1 get\tfreq\r\n"
                                           : "start_sweep\r\n");
     CHECK(count_of(fake_out(PC), "[MC] E: line contains non-printable characters") == 2);
     fake_inject(PC, "mc_status\r\n");
@@ -335,7 +341,7 @@ static void test_dc_uart_errors_warned_not_blocked(void)
     fake_set_hw(DC(4), &hw);
     fake_inject(DC(4), "[ESV2-1] still forwarded\r\n");
     pump(10);
-    CHECK(strstr(fake_out(PC), "[ESV2-7] still forwarded\r\n") != NULL);
+    CHECK(strstr(fake_out(PC), "[ESV2-4] still forwarded\r\n") != NULL);
     CHECK(strstr(fake_out(PC), "[MC] W: DC4 DC4: 5 UART error(s)") != NULL);
     /* Rate limited: more errors within the interval give no new warning. */
     fake_out_clear(PC);
@@ -357,11 +363,11 @@ static void test_rx_overrun_discards_partial_line(void)
     pump(2);
     hw.rx_overruns = 1;                 /* main loop stalled: data lost */
     fake_set_hw(DC(2), &hw);
-    fake_inject(DC(2), "ne\r\n[ESV2-2] whole\r\n");
+    fake_inject(DC(2), "ne\r\n[ESV2-1] whole\r\n");
     pump(10);
     CHECK(strstr(fake_out(PC), "first half") == NULL);
     CHECK(strstr(fake_out(PC), "[DC-2] ne\r\n") == NULL);   /* tail not a line */
-    CHECK(strstr(fake_out(PC), "[ESV2-4] whole\r\n") != NULL);
+    CHECK(strstr(fake_out(PC), "[ESV2-2] whole\r\n") != NULL);
     CHECK(strstr(fake_out(PC), "[MC] W: DC2 input lost (main loop stalled") != NULL);
 }
 
@@ -372,14 +378,14 @@ static void test_abort_delimiter_precedes_queued_stops(void)
     fake_tx_mode(DC(1), FAKE_TX_STALL);
     fake_inject(PC, "@1 first\r\n");
     pump(3);
-    fake_inject(PC, "@1 stop\r\n@2 cancel\r\n@1 later\r\n");
+    fake_inject(PC, "@1 stop\r\n#1 cancel\r\n@1 later\r\n");
     pump(3);
     fake_advance(200);
     pump(1);                                    /* abort "first"           */
     fake_tx_mode(DC(1), FAKE_TX_AUTO);
     pump(10);
     /* "@1 later" was sent after the stop, so it rightly follows it. */
-    CHECK_STR(fake_out(DC(1)), "\r\n@1 stop\r\n@2 cancel\r\n@1 later\r\n");
+    CHECK_STR(fake_out(DC(1)), "\r\n@1 stop\r\ncancel\r\n@1 later\r\n");
 }
 
 /* Review finding 2: an error behind buffered lines must still taint the
@@ -467,19 +473,19 @@ static void test_dma_restart_resyncs(void)
     pump(2);
     hw.rx_restarts = 1;
     fake_set_hw(DC(3), &hw);
-    fake_inject(DC(3), "tial\r\n[ESV2-2] whole\r\n");
+    fake_inject(DC(3), "tial\r\n[ESV2-1] whole\r\n");
     pump(10);
     CHECK(strstr(fake_out(PC), "tial") == NULL);
-    CHECK(strstr(fake_out(PC), "[ESV2-6] whole\r\n") != NULL);
+    CHECK(strstr(fake_out(PC), "[ESV2-3] whole\r\n") != NULL);
 }
 
 static void test_dc_binary_frames_dropped(void)
 {
     boot();
-    static const char s[] = "[ESV2-1] a\r\n\0\x03\x0a\x0d\x09\0[ESV2-2] b\r\n";
+    static const char s[] = "[ESV2-1] a\r\n\0\x03\x0a\x0d\x09\0[ESV2-1] b\r\n";
     fake_inject_bytes(DC(2), s, sizeof s - 1u);
     pump(10);
-    CHECK_STR(fake_out(PC), "[ESV2-3] a\r\n[ESV2-4] b\r\n");
+    CHECK_STR(fake_out(PC), "[ESV2-2] a\r\n[ESV2-2] b\r\n");
 }
 
 /* Feed the given DataControllers a telemetry line every 500 ms for ms. */
@@ -500,7 +506,7 @@ static void test_health_events(void)
     pump(2);
     fake_inject(DC(1), "PZT Temp: 1\r\n");
     pump(4);
-    CHECK(strstr(fake_out(PC), "[MC] I: DC1 (port 1, DC1, @1,@2) online") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] I: DC1 (port 1, DC1, @1) online") != NULL);
     /* Only DC1 and DC4 are plugged in: the others are absent, quietly. */
     static const unsigned plugged[] = { 1, 4 };
     keep_alive(plugged, 2, 4000);
@@ -516,12 +522,12 @@ static void test_health_events(void)
     static const unsigned only4[] = { 4 };
     keep_alive(only4, 1, MC_DC_SILENT_MS + 500u);
     pump(100);
-    CHECK(strstr(fake_out(PC), "[MC] W: DC1 (port 1, DC1, @1,@2) lost: silent for") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] W: DC1 (port 1, DC1, @1) lost: silent for") != NULL);
     CHECK(strstr(fake_out(PC), "DC4") == NULL); /* DC4 is fine              */
     CHECK(mc_app_fault_active());
     fake_inject(DC(1), "PZT Temp: 1\r\n");
     pump(100);
-    CHECK(strstr(fake_out(PC), "[MC] I: DC1 (port 1, DC1, @1,@2) back online") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] I: DC1 (port 1, DC1, @1) back online") != NULL);
     CHECK(!mc_app_fault_active());
     /* Transitions are reported once, not repeatedly. */
     fake_out_clear(PC);
@@ -539,9 +545,9 @@ static void test_absent_and_lost_refusal(void)
     fake_out_clear(PC);
 
     /* Addressed to an absent DataController: refused with a reply. */
-    fake_inject(PC, "@11 start_sweep\r\n");
+    fake_inject(PC, "@6 start_sweep\r\n");
     pump(100);
-    CHECK(strstr(fake_out(PC), "[MC] E: DC6 (port 6) not connected, not sent: @11 start_sweep") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] E: DC6 (port 6) not connected, not sent: @6 start_sweep") != NULL);
     CHECK(fake_out_len(DC(6)) == 0);
     fake_inject(PC, "#5 enable_pump\r\n");
     fake_advance(MC_WARN_INTERVAL_MS);
@@ -551,9 +557,9 @@ static void test_absent_and_lost_refusal(void)
 
     /* Stops always go out, even to an absent port, without a complaint. */
     fake_out_clear(PC);
-    fake_inject(PC, "@12 stop\r\n");
+    fake_inject(PC, "@6 stop\r\n");
     pump(100);
-    CHECK_STR(fake_out(DC(6)), "@2 stop\r\n");
+    CHECK_STR(fake_out(DC(6)), "@1 stop\r\n");
     CHECK(strstr(fake_out(PC), "DC6") == NULL);
 
     /* Broadcasts go to every port; absent ports cause no reply. */
@@ -573,13 +579,13 @@ static void test_absent_and_lost_refusal(void)
     fake_out_clear(PC);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k) fake_out_clear(DC(k));
     fake_advance(MC_WARN_INTERVAL_MS);
-    fake_inject(PC, "@5 get volt\r\n");
+    fake_inject(PC, "@3 get volt\r\n");
     pump(100);
-    CHECK(strstr(fake_out(PC), "[MC] E: DC3 (port 3) lost, silent for 5 s, not sent: @5 get volt") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] E: DC3 (port 3) lost, silent for 5 s, not sent: @3 get volt") != NULL);
     CHECK(fake_out_len(DC(3)) == 0);
-    fake_inject(PC, "@6 cancel\r\n");
+    fake_inject(PC, "@3 cancel\r\n");
     pump(100);
-    CHECK_STR(fake_out(DC(3)), "@2 cancel\r\n");
+    CHECK_STR(fake_out(DC(3)), "@1 cancel\r\n");
     CHECK(strstr(fake_out(PC), "[MC] W: DC3 (port 3) is lost; 'cancel' sent anyway") != NULL);
     fake_inject(PC, "start_sweep\r\n");
     pump(100);
@@ -590,7 +596,7 @@ static void test_absent_and_lost_refusal(void)
     /* It comes back: commands flow again. */
     fake_inject(DC(3), "PZT Temp: 1\r\n");
     pump(5);
-    fake_inject(PC, "@5 get volt\r\n");
+    fake_inject(PC, "@3 get volt\r\n");
     pump(100);
     CHECK(strstr(fake_out(DC(3)), "@1 get volt\r\n") != NULL);
 }
@@ -614,12 +620,14 @@ static void test_dc_pacing(void)
     CHECK_STR(fake_out(DC(1)), "@1 a\r\n@1 b\r\n");
 
     /* A stop never waits for the gap, and goes ahead of what is queued. */
-    fake_inject(PC, "@2 stop\r\n");
+    fake_inject(PC, "#1 stop\r\n");
     pump(5);
-    CHECK_STR(fake_out(DC(1)), "@1 a\r\n@1 b\r\n@2 stop\r\n");
-    fake_advance(5);
+    CHECK_STR(fake_out(DC(1)), "@1 a\r\n@1 b\r\nstop\r\n");
+    fake_out_clear(DC(1));
+    /* A board stop purges what is queued for that EVS2, and still goes now. */
+    fake_inject(PC, "@1 d\r\n@1 stop\r\n");
     pump(5);
-    CHECK_STR(fake_out(DC(1)), "@1 a\r\n@1 b\r\n@2 stop\r\n@1 c\r\n");
+    CHECK_STR(fake_out(DC(1)), "@1 stop\r\n");
 
     /* Per-DataController setting, report, and validation. */
     fake_inject(PC, "mc_pace 2 20\r\nmc_pace\r\nmc_pace 7 3\r\nmc_pace 999\r\n");
@@ -634,7 +642,7 @@ static void test_dc_pacing(void)
     fake_inject(PC, "mc_pace 0\r\n");
     pump(20);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k) fake_out_clear(DC(k));
-    fake_inject(PC, "@3 x\r\n@3 y\r\n@3 z\r\n");
+    fake_inject(PC, "@2 x\r\n@2 y\r\n@2 z\r\n");
     pump(10);
     CHECK_STR(fake_out(DC(2)), "@1 x\r\n@1 y\r\n@1 z\r\n");
 }
@@ -643,7 +651,7 @@ static void test_dc_pacing(void)
 static void test_vcp_accepts_commands(void)
 {
     boot();
-    fake_inject(MC_PORT_DBG, "#3 hello_from_vcp\r\n@5 ping\r\n");
+    fake_inject(MC_PORT_DBG, "#3 hello_from_vcp\r\n@3 ping\r\n");
     pump(20);
     CHECK_STR(fake_out(DC(3)), "hello_from_vcp\r\n@1 ping\r\n");
     fake_inject(MC_PORT_DBG, "dc_status\r\n");
@@ -659,13 +667,13 @@ static void test_refusals_each_get_a_reply(void)
     fake_reset();
     mc_app_init();                              /* nothing connected */
     for (unsigned i = 1; i <= MC_REPLY_BURST + 2u; ++i) {
-        snprintf(line, sizeof line, "@11 cmd%u\r\n", i);
+        snprintf(line, sizeof line, "@6 cmd%u\r\n", i);
         fake_inject(PC, line);
     }
     pump(100);
-    CHECK(count_of(pc_out(), "not connected, not sent: @11 cmd") == (int)MC_REPLY_BURST);
-    CHECK(strstr(pc_out(), "not sent: @11 cmd1\r\n") != NULL);
-    CHECK(strstr(pc_out(), "not sent: @11 cmd2\r\n") != NULL);
+    CHECK(count_of(pc_out(), "not connected, not sent: @6 cmd") == (int)MC_REPLY_BURST);
+    CHECK(strstr(pc_out(), "not sent: @6 cmd1\r\n") != NULL);
+    CHECK(strstr(pc_out(), "not sent: @6 cmd2\r\n") != NULL);
     fake_advance(MC_WARN_INTERVAL_MS);
     pump(100);
     CHECK(strstr(pc_out(), "commands to absent/lost DataControllers not sent (2 more)") != NULL);
@@ -686,11 +694,11 @@ static void test_dc_status_command(void)
     pump(100);
     const char *o = fake_out(PC);
     CHECK(strstr(o, "[MC] dc_status: 3 live, 2 absent, 1 lost\r\n") != NULL);
-    CHECK(strstr(o, "[MC]   live   DC1 (port 1, DC1, @1,@2) last_rx=") != NULL);
-    CHECK(strstr(o, "[MC]   live   DC4 (port 4, DC4, @7,@8) last_rx=") != NULL);
-    CHECK(strstr(o, "[MC]   absent DC5 (port 5, DC5, @9,@10)\r\n") != NULL);
-    CHECK(strstr(o, "[MC]   absent DC6 (port 6, DC6, @11,@12)\r\n") != NULL);
-    CHECK(strstr(o, "[MC]   lost   DC2 (port 2, DC2, @3,@4) silent for 3 s\r\n") != NULL);
+    CHECK(strstr(o, "[MC]   live   DC1 (port 1, DC1, @1) last_rx=") != NULL);
+    CHECK(strstr(o, "[MC]   live   DC4 (port 4, DC4, @4) last_rx=") != NULL);
+    CHECK(strstr(o, "[MC]   absent DC5 (port 5, DC5, @5)\r\n") != NULL);
+    CHECK(strstr(o, "[MC]   absent DC6 (port 6, DC6, @6)\r\n") != NULL);
+    CHECK(strstr(o, "[MC]   lost   DC2 (port 2, DC2, @2) silent for 3 s\r\n") != NULL);
     /* Order: live, then absent, then lost. */
     CHECK(strstr(o, "live   DC4") < strstr(o, "absent DC5") &&
           strstr(o, "absent DC6") < strstr(o, "lost   DC2"));
@@ -707,7 +715,7 @@ static void test_dc_status_command(void)
     fake_out_clear(PC);
     fake_inject(PC, "dc_status\r\n");
     pump(100);
-    CHECK(strstr(fake_out(PC), "DC4 (port 4, DC4, @7,@8) last_rx=0ms [FAULTED: tx_stalls]") != NULL);
+    CHECK(strstr(fake_out(PC), "DC4 (port 4, DC4, @4) last_rx=0ms [FAULTED: tx_stalls]") != NULL);
 }
 
 static void test_status_and_local_commands(void)
@@ -720,8 +728,8 @@ static void test_status_and_local_commands(void)
     const char *o = fake_out(PC);
     CHECK(strstr(o, "[MC] status up=") != NULL);
     CHECK(strstr(o, "[MC] PC  PC 921600 baud") != NULL);
-    CHECK(strstr(o, "[MC] DC1 DC1 live @1,@2") != NULL);
-    CHECK(strstr(o, "[MC] DC6 DC6 live @11,@12") != NULL);
+    CHECK(strstr(o, "[MC] DC1 DC1 live @1 ") != NULL);
+    CHECK(strstr(o, "[MC] DC6 DC6 live @6 ") != NULL);
     CHECK(strstr(o, "fe=7 ne=1 overruns=0 dma_restarts=2") != NULL);
 
     fake_out_clear(PC);
@@ -732,7 +740,7 @@ static void test_status_and_local_commands(void)
     pump(20);
     CHECK(strstr(fake_out(PC), "[MC] pong\r\n") != NULL);
     CHECK(strstr(fake_out(PC), "[MC] MasterController " MC_FW_VERSION " (built") != NULL);
-    CHECK(strstr(fake_out(PC), "[MC] @1..@12 <cmd>") != NULL);
+    CHECK(strstr(fake_out(PC), "[MC] @1..@6 <cmd>: one EVS2 | #1..#6 <cmd>: one DataController") != NULL);
     for (unsigned k = 1; k <= MC_NUM_DC; ++k)
         CHECK(fake_out_len(DC(k)) == 0);        /* local commands stay local */
 
@@ -746,7 +754,7 @@ static void test_tx_stall_recovers(void)
 {
     boot();
     fake_tx_mode(DC(2), FAKE_TX_STALL);
-    fake_inject(PC, "@3 one\r\n@3 two\r\n");
+    fake_inject(PC, "@2 one\r\n@2 two\r\n");
     pump(5);
     CHECK(fake_tx_starts(DC(2)) == 1);
     fake_advance(MC_TX_STALL_MARGIN_MS + 10u);
@@ -802,19 +810,19 @@ static void test_upload_burst_in_order(void)
     char line[48];
     const int lines = 80;
     for (int i = 0; i < lines; ++i) {
-        snprintf(line, sizeof line, "@2 seq_line %d,abc,def\r\n", i);
+        snprintf(line, sizeof line, "@1 seq_line %d,abc,def\r\n", i);
         fake_inject(PC, line);                  /* one burst, 921600 style */
     }
     pump(3);
     while (fake_complete(DC(1))) pump(1);
     pump(2);
     const char *o = fake_out(DC(1));
-    CHECK(count_of(o, "@2 seq_line ") == lines);
+    CHECK(count_of(o, "@1 seq_line ") == lines);
     char expect[48];
     const char *p = o;
     int in_order = 1;
     for (int i = 0; i < lines && p; ++i) {
-        snprintf(expect, sizeof expect, "@2 seq_line %d,abc,def\r\n", i);
+        snprintf(expect, sizeof expect, "@1 seq_line %d,abc,def\r\n", i);
         if (strncmp(p, expect, strlen(expect)) != 0) { in_order = 0; break; }
         p += strlen(expect);
     }
@@ -854,7 +862,7 @@ static void test_sup_stalls_rebuild_then_recover(void)
     boot();
     fake_tx_mode(DC(2), FAKE_TX_STALL);
     fake_reinit_heals(DC(2), 1);
-    fake_inject(PC, "@3 one\r\n");
+    fake_inject(PC, "@2 one\r\n");
     stall_cycles((int)MC_SUP_STALL_STRIKES);
     CHECK(fake_reinits(DC(2)) == 1);
     CHECK(strstr(pc_out(), "[MC] W: DC2 tx_stalls: rebuilding the UART") != NULL);
@@ -871,10 +879,10 @@ static void test_sup_quarantine_and_degraded_broadcast(void)
 {
     boot();
     fake_tx_mode(DC(3), FAKE_TX_STALL);         /* rebuilding does not help */
-    fake_inject(PC, "@5 doomed\r\n");
+    fake_inject(PC, "@3 doomed\r\n");
     stall_cycles((int)MC_SUP_STALL_STRIKES + 1);
     CHECK(strstr(pc_out(), "[MC] E: DC3 faulted (tx_stalls): quarantined") != NULL);
-    CHECK(strstr(pc_out(), "EVS2 @5,@6 unavailable; retrying in 5 s") != NULL);
+    CHECK(strstr(pc_out(), "EVS2 @3 unavailable; retrying in 5 s") != NULL);
     CHECK(!fake_enabled(DC(3)));
     CHECK(mc_app_fault_active());
 
@@ -886,10 +894,10 @@ static void test_sup_quarantine_and_degraded_broadcast(void)
         CHECK((strstr(fake_out(DC(k)), "start_defog\r\n") != NULL) == (k != 3));
     CHECK(strstr(pc_out(), "[MC] W: sent to 5 of 6 DataControllers (faulted: DC3): start_defog") != NULL);
 
-    fake_inject(PC, "@6 get volt\r\n");
+    fake_inject(PC, "@3 get volt\r\n");
     pump(5);
-    CHECK(strstr(pc_out(), "[MC] E: DC3 is faulted (tx_stalls), not sent: @6 get volt") != NULL);
-    fake_inject(PC, "@6 stop\r\n");
+    CHECK(strstr(pc_out(), "[MC] E: DC3 is faulted (tx_stalls), not sent: @3 get volt") != NULL);
+    fake_inject(PC, "@3 stop\r\n");
     pump(5);
     CHECK(strstr(pc_out(), "[MC] W: DC3 is faulted: 'stop' queued, sent first if it recovers") != NULL);
     CHECK(fake_out_len(DC(3)) == 0);            /* nothing sent while quarantined */
@@ -906,7 +914,7 @@ static void test_sup_quarantine_and_degraded_broadcast(void)
     pump(5);
     CHECK(strstr(pc_out(), "[MC] I: DC3 recovered (tx_stalls)") != NULL);
     /* The queued stop went out first; nothing sent while faulted leaked out. */
-    CHECK(strstr(fake_out(DC(3)), "\r\n@2 stop\r\n") == fake_out(DC(3)));
+    CHECK(strstr(fake_out(DC(3)), "\r\n@1 stop\r\n") == fake_out(DC(3)));
     CHECK(strstr(fake_out(DC(3)), "start_defog") == NULL);
     CHECK(strstr(fake_out(DC(3)), "get volt") == NULL);
 
@@ -1082,9 +1090,9 @@ static void test_rebuild_quiet_period(void)
     fake_inject(PC, "mc_recover 1\r\n");
     pump(3);
     fake_advance(100);                          /* > 89 ms: one 512-char line at 57600 */
-    fake_inject(DC(1), "[ESV2-2] first line after quiet\r\n");
+    fake_inject(DC(1), "[ESV2-1] first line after quiet\r\n");
     pump(10);
-    CHECK(strstr(pc_out(), "[ESV2-2] first line after quiet\r\n") != NULL);
+    CHECK(strstr(pc_out(), "[ESV2-1] first line after quiet\r\n") != NULL);
 }
 
 static void test_mc_recover_command(void)
@@ -1114,7 +1122,7 @@ int main(void)
     RUN(test_upstream_retag);
     RUN(test_upstream_never_interleaves);
     RUN(test_broadcast_all_or_nothing);
-    RUN(test_stop_overtakes_and_purges_same_board);
+    RUN(test_stop_overtakes_and_purges);
     RUN(test_broadcast_stop_purges_everything);
     RUN(test_later_stop_never_discards_earlier_stop);
     RUN(test_stop_fits_even_when_queue_full);

@@ -13,7 +13,7 @@ the `rebase_F401_hex` branch:
 
 Behind a MasterController there are six DataControllers, and every one of
 them uses node IDs 1–3. Forwarding their frames unchanged would give the
-GUI six indistinguishable "controller 1"s and "board 2"s.
+GUI six indistinguishable "controller 1"s and "board 1"s.
 
 v1 therefore:
 - **drops** every binary frame arriving from a DataController, and counts
@@ -36,12 +36,12 @@ v1 therefore:
    | 0 | GUI |
    | 1 | MasterController |
    | 16 + k | DataController *k* (k = 1…6) |
-   | 32 + n | EVS2 *n* (n = 1…12) |
+   | 32 + n | EVS2 *n* (n = 1…6; 1…12 in the two-board build) |
 
 3. **Route downstream (laptop → DC).** Decode and CRC-check each frame.
-   Map the destination to (DataController *k*, local node 1/2/3). Rewrite
-   the destination, re-encode with a new CRC, and queue it as one whole
-   entry on DC *k*.
+   Map the destination to (DataController *k*, local node 1 or 2; node 3
+   too in the two-board build). Rewrite the destination, re-encode with a
+   new CRC, and queue it as one whole entry on DC *k*.
    - The source stays 0 (GUI).
    - Session and transaction IDs pass through unchanged, so end-to-end
      ACK correlation and retries still work.

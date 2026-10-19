@@ -5,11 +5,15 @@
  * routing core can be compiled and tested on a PC.
  *
  * Topology:
- *   PC (laptop GUI) <-> MasterController <-> 6 x F401 DataController <-> 2 x EVS2 each
+ *   PC (laptop GUI) <-> MasterController <-> 6 x F401 DataController <-> 1 x EVS2 each
  *
  *   Port 0      : PC link          USART2  PA2 TX / PA3 RX   921600 8N1
  *   Port 1..6   : DataController   57600 8N1 (see mc_platform.c for the pin map)
- *   Port 7      : ST-LINK VCP      USART3  diagnostics only, TX only, 115200
+ *   Port 7      : ST-LINK VCP      USART3  diagnostics + commands, 115200
+ *
+ * EVS2 addressing: board n (1..MC_NUM_BOARDS) is on DataController
+ * (n - 1) / MC_BOARDS_PER_DC + 1. With one board per DataController,
+ * @1..@6 map one-to-one onto DC1..DC6.
  */
 #ifndef MC_CONFIG_H
 #define MC_CONFIG_H
@@ -18,8 +22,26 @@
 
 /* ---- Topology ---------------------------------------------------------- */
 #define MC_NUM_DC              6u          /* DataControllers                  */
-#define MC_BOARDS_PER_DC       2u          /* EVS2 boards per DataController   */
+#ifndef MC_BOARDS_PER_DC
+#define MC_BOARDS_PER_DC       1u          /* EVS2 boards per DataController:
+                                              1 (current system) or 2          */
+#endif
 #define MC_NUM_BOARDS          (MC_NUM_DC * MC_BOARDS_PER_DC)
+/* With one board per DataController: which of the F401's two board ports it
+   is wired to. 1 = F401 USART2 (the F401 addresses it as "@1" and tags its
+   output "[ESV2-1]"); 2 = F401 USART6 ("@2", "[ESV2-2]"). Ignored when
+   MC_BOARDS_PER_DC is 2. Output tagged for the other, unused port is passed
+   on as an ordinary "[DC-k] ..." line.                                      */
+#ifndef MC_DC_BOARD_SLOT
+#define MC_DC_BOARD_SLOT       1u
+#endif
+
+#if MC_BOARDS_PER_DC < 1u || MC_BOARDS_PER_DC > 2u
+#error "MC_BOARDS_PER_DC must be 1 or 2 (an F401 has two board ports)"
+#endif
+#if MC_DC_BOARD_SLOT < 1u || MC_DC_BOARD_SLOT > 2u
+#error "MC_DC_BOARD_SLOT must be 1 or 2"
+#endif
 
 #define MC_PORT_PC             0u
 #define MC_PORT_DC(k)          ((unsigned)(k))   /* k = 1..MC_NUM_DC           */
@@ -30,8 +52,9 @@
 /* Longest accepted line, excluding its terminator. The F401 accepts 511
    characters per line and emits at most ~253, so 512 covers both sides.     */
 #define MC_LINE_MAX            512u
-/* Largest possible rewrite overhead: "[DC-6] " (7) vs "[ESV2-12]" (+1), and
-   CRLF. A TX slot must hold the longest line plus that overhead.            */
+/* Largest possible rewrite overhead: the "[DC-6] " prefix (7), or "[ESV2-12]"
+   for "[ESV2-2]" (+1, two boards per DataController only), plus CRLF. A TX
+   slot must hold the longest line plus that overhead.                       */
 #define MC_TAG_OVERHEAD        8u
 #define MC_SLOT_BYTES          (MC_LINE_MAX + MC_TAG_OVERHEAD + 2u)
 

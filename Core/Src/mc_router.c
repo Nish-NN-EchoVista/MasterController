@@ -64,14 +64,15 @@ void mc_route_pc_line(const char *line, uint16_t len, mc_route_t *r)
         unsigned n = parse_address(line + 1, len - 1u, &at);
         if (n < 1u || n > MC_NUM_BOARDS) {
             r->kind = MC_ROUTE_INVALID;
-            r->error = "invalid EVS2 address (use @1..@12 <command>)";
+            r->error = "invalid EVS2 address";
             return;
         }
+        unsigned slot = mc_board_slot(n);
         r->kind = MC_ROUTE_BOARD;
         r->board = (uint8_t)n;
-        r->dc = (uint8_t)((n + 1u) / 2u);
-        r->tag = (n & 1u) ? MC_TAG_BOARD1 : MC_TAG_BOARD2;
-        r->prefix = (n & 1u) ? "@1 " : "@2 ";
+        r->dc = (uint8_t)mc_board_dc(n);
+        r->tag = slot == 1u ? MC_TAG_BOARD1 : MC_TAG_BOARD2;
+        r->prefix = slot == 1u ? "@1 " : "@2 ";
         r->payload = line + 1 + at;
         r->payload_len = (uint16_t)(len - 1u - at);
         r->urgent = (uint8_t)mc_is_urgent(r->payload, r->payload_len);
@@ -83,7 +84,7 @@ void mc_route_pc_line(const char *line, uint16_t len, mc_route_t *r)
         unsigned k = parse_address(line + 1, len - 1u, &at);
         if (k < 1u || k > MC_NUM_DC) {
             r->kind = MC_ROUTE_INVALID;
-            r->error = "invalid DataController address (use #1..#6 <command>)";
+            r->error = "invalid DataController address";
             return;
         }
         r->kind = MC_ROUTE_DC;
@@ -117,12 +118,36 @@ static void put_uint(out_t *o, unsigned v)
     if (n > 0) put(o, tmp, (size_t)n);
 }
 
+unsigned mc_board_dc(unsigned n)
+{
+    return (n - 1u) / MC_BOARDS_PER_DC + 1u;
+}
+
+unsigned mc_board_slot(unsigned n)
+{
+#if MC_BOARDS_PER_DC == 1u
+    (void)n;
+    return MC_DC_BOARD_SLOT;
+#else
+    return (n - 1u) % MC_BOARDS_PER_DC + 1u;
+#endif
+}
+
+unsigned mc_board_of(unsigned dc, unsigned slot)
+{
+#if MC_BOARDS_PER_DC == 1u
+    return slot == MC_DC_BOARD_SLOT ? dc : 0u;
+#else
+    return (dc - 1u) * MC_BOARDS_PER_DC + slot;
+#endif
+}
+
 size_t mc_retag_dc_line(unsigned dc, const char *line, size_t len,
                         char *out, size_t cap)
 {
     /* Each rule: original prefix, text before the number, text after it,
-       and which of the DataController's two boards it names.              */
-    static const struct { const char *match, *head, *tail; unsigned board; } rules[] = {
+       and which of the F401's two board ports it names.                   */
+    static const struct { const char *match, *head, *tail; unsigned slot; } rules[] = {
         { "[ESV2-1]",       "[ESV2-",      "]",       1u },
         { "[ESV2-2]",       "[ESV2-",      "]",       2u },
         { "TX to ESV2-1:",  "TX to ESV2-", ":",       1u },
@@ -134,9 +159,10 @@ size_t mc_retag_dc_line(unsigned dc, const char *line, size_t len,
 
     for (size_t i = 0; i < sizeof rules / sizeof rules[0]; ++i) {
         size_t m = strlen(rules[i].match);
-        if (starts_with(line, len, rules[i].match)) {
+        unsigned board = mc_board_of(dc, rules[i].slot);
+        if (board && starts_with(line, len, rules[i].match)) {
             put_str(&o, rules[i].head);
-            put_uint(&o, (dc - 1u) * MC_BOARDS_PER_DC + rules[i].board);
+            put_uint(&o, board);
             put_str(&o, rules[i].tail);
             put(&o, line + m, len - m);
             put(&o, "\r\n", 2);

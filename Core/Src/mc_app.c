@@ -245,6 +245,23 @@ static void resync_after_loss(unsigned port, uint32_t now)
 }
 
 static int is_dc_port(unsigned port) { return port >= 1u && port <= MC_NUM_DC; }
+
+/* The EVS2 addresses served by DataController k: "@3", or "@5,@6" with two
+   boards per DataController.                                              */
+static const char *dc_addrs(unsigned k)
+{
+    static char buf[MC_NUM_DC + 1u][16];
+    char *b = buf[k <= MC_NUM_DC ? k : 0u];
+    size_t n = 0;
+    b[0] = '\0';
+    for (unsigned slot = 1; slot <= 2u; ++slot) {
+        unsigned board = mc_board_of(k, slot);
+        if (!board) continue;
+        int w = snprintf(b + n, sizeof buf[0] - n, "%s@%u", n ? "," : "", board);
+        if (w > 0 && (size_t)w < sizeof buf[0] - n) n += (size_t)w;
+    }
+    return b;
+}
 /* Ports that accept commands: the laptop link and the ST-LINK VCP. */
 static int is_cmd_port(unsigned port) { return port == MC_PORT_PC || port == MC_PORT_DBG; }
 static int dc_faulted(unsigned k)    { return dc(k)->health == H_FAULTED; }
@@ -347,8 +364,8 @@ static void quarantine(unsigned port, const char *reason, uint32_t now)
     uint16_t purged = mc_txq_purge(&p->txq, 0xFFu);   /* ordinary lines only */
     p->c.purged += purged;
     emit("E: DC%u faulted (%s): quarantined, %u queued line(s) discarded, "
-         "EVS2 @%u,@%u unavailable; retrying in %lu s", port, reason,
-         (unsigned)purged, 2u * port - 1u, 2u * port,
+         "EVS2 %s unavailable; retrying in %lu s", port, reason,
+         (unsigned)purged, dc_addrs(port),
          (unsigned long)(p->backoff_ms / 1000u));
     check_board_fault(now);
 }
@@ -533,8 +550,8 @@ static const char *presence_name(int pr)
 /* "DC3 (port 3, UART4 PA0/PA1, @5,@6)" */
 static int describe_dc(char *buf, size_t cap, unsigned k)
 {
-    return snprintf(buf, cap, "DC%u (port %u, %s, @%u,@%u)", k, k,
-                    mc_plat_port_name(MC_PORT_DC(k)), 2u * k - 1u, 2u * k);
+    return snprintf(buf, cap, "DC%u (port %u, %s, %s)", k, k,
+                    mc_plat_port_name(MC_PORT_DC(k)), dc_addrs(k));
 }
 
 /* List the DataControllers in one presence state: "DC1 DC4" or "none". */
@@ -691,7 +708,12 @@ static void handle_pc_line(const char *line, uint16_t len, uint32_t now)
 
     if (r.kind == MC_ROUTE_LOCAL) { handle_local(line, len); return; }
     if (r.kind == MC_ROUTE_INVALID) {
-        emit("E: %s, not sent: %.*s", r.error, clip(len), line);
+        if (line[0] == '@')
+            emit("E: %s (use @1..@%u <command>), not sent: %.*s", r.error,
+                 (unsigned)MC_NUM_BOARDS, clip(len), line);
+        else
+            emit("E: %s (use #1..#%u <command>), not sent: %.*s", r.error,
+                 (unsigned)MC_NUM_DC, clip(len), line);
         return;
     }
 
@@ -806,12 +828,12 @@ static void report_status(uint32_t now)
             snprintf(age, sizeof age, "%lums", (unsigned long)elapsed(now, p->last_rx_ms));
         else
             snprintf(age, sizeof age, "never");
-        emit("DC%u %s %s @%u,@%u last_rx=%s rx=%lu lines=%lu up_drop=%lu tx=%lu q=%u/%u "
+        emit("DC%u %s %s %s last_rx=%s rx=%lu lines=%lu up_drop=%lu tx=%lu q=%u/%u "
              "rejected=%lu purged=%lu overlong=%lu binary=%lu fe=%lu ne=%lu "
              "overruns=%lu dma_restarts=%lu stalls=%lu health=%s%s%s%s "
              "recoveries=%lu quarantines=%lu pace=%lums",
              k, mc_plat_port_name(MC_PORT_DC(k)), presence_name(dc_presence(k, now)),
-             2u * k - 1u, 2u * k, age,
+             dc_addrs(k), age,
              (unsigned long)p->c.rx_bytes, (unsigned long)p->c.rx_lines,
              (unsigned long)p->c.up_dropped, (unsigned long)p->c.tx_lines,
              (unsigned)mc_txq_count(&p->txq), (unsigned)MC_DC_TXQ_SLOTS,
@@ -938,8 +960,8 @@ static void handle_local(const char *line, uint16_t len)
     } else if (IS("mc_pace") || (len > 8u && memcmp(line, "mc_pace ", 8) == 0)) {
         handle_pace(line + (len > 8u ? 8 : len), len > 8u ? (size_t)(len - 8u) : 0u);
     } else if (IS("mc_help")) {
-        emit("@1..@12 <cmd>: one EVS2 | #1..#6 <cmd>: one DataController | "
-             "<cmd>: all six DataControllers");
+        emit("@1..@%u <cmd>: one EVS2 | #1..#%u <cmd>: one DataController | "
+             "<cmd>: all DataControllers", (unsigned)MC_NUM_BOARDS, (unsigned)MC_NUM_DC);
         emit("stop, cancel, @0 stop_all: sent ahead of queued lines, which are discarded");
         emit("dc_status mc_status mc_version mc_ping mc_reset_stats "
              "mc_recover <1..6|pc|all> mc_pace [1..6] <0..%u ms> mc_help",

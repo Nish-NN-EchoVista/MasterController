@@ -1,9 +1,14 @@
 /*
  * mc_router.h - Pure routing rules (no I/O, no state).
  *
+ * Board numbering follows mc_config.h (MC_BOARDS_PER_DC, MC_DC_BOARD_SLOT).
+ * Current system: one EVS2 per DataController on its board-1 port, so
+ * board n is DataController n and the F401 knows it as "@1" / "[ESV2-1]".
+ *
  * PC -> DataControllers (one line in, zero or more lines out)
- *   "@n <cmd>"   n = 1..12   EVS2 n. Sent as "@1 <cmd>" or "@2 <cmd>" to
- *                            DataController ceil(n/2).
+ *   "@n <cmd>"   n = 1..6    EVS2 n. Sent as "@1 <cmd>" to DataController n.
+ *                            (With two boards per DataController: n = 1..12,
+ *                            sent as "@1"/"@2" to DataController ceil(n/2).)
  *   "#k <cmd>"   k = 1..6    "<cmd>" sent verbatim to DataController k
  *                            (DC-level commands such as enable_pump, lockout++).
  *   "mc_...", "dc_status"    handled by the MasterController itself.
@@ -14,11 +19,13 @@
  * "stop", "cancel" and "@0 stop_all" are urgent: they overtake queued lines,
  * and queued lines for the same boards are discarded first.
  *
- * DataController k -> PC
- *   "[ESV2-1] x"      -> "[ESV2-(2k-1)] x"      "[ESV2-2] x"      -> "[ESV2-2k] x"
- *   "TX to ESV2-1: x" -> "TX to ESV2-(2k-1): x" "TX to ESV2-2: x" -> "TX to ESV2-2k: x"
- *   "Board1 Temp: x"  -> "Board(2k-1) Temp: x"  "Board2 Temp: x"  -> "Board2k Temp: x"
- *   anything else     -> "[DC-k] x"
+ * DataController k -> PC (current system, one board on the board-1 port)
+ *   "[ESV2-1] x"      -> "[ESV2-k] x"
+ *   "TX to ESV2-1: x" -> "TX to ESV2-k: x"
+ *   "Board1 Temp: x"  -> "Boardk Temp: x"
+ *   anything else     -> "[DC-k] x"   (including "[ESV2-2] ..." from the
+ *                                       unused port, should one ever appear)
+ * With two boards per DataController, ESV2-1/-2 become 2k-1 / 2k.
  */
 #ifndef MC_ROUTER_H
 #define MC_ROUTER_H
@@ -55,6 +62,13 @@ void   mc_route_pc_line(const char *line, uint16_t len, mc_route_t *r);
 
 /* 1 if the command (surrounding blanks ignored) is stop, cancel or @0 stop_all. */
 int    mc_is_urgent(const char *cmd, size_t len);
+
+/* Board numbering: board n (1..MC_NUM_BOARDS) is on DataController
+   mc_board_dc(n), on F401 board port mc_board_slot(n) (1 or 2).
+   mc_board_of(dc, slot) is the reverse; 0 if that port has no board.      */
+unsigned mc_board_dc(unsigned n);
+unsigned mc_board_slot(unsigned n);
+unsigned mc_board_of(unsigned dc, unsigned slot);
 
 /* Rewrite one DataController line for the PC and append CRLF.
    Returns the output length, or 0 if it does not fit in cap.               */

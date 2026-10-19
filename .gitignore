@@ -25,6 +25,7 @@ Thumbs.db
 # Host test binaries
 tests/host/*.exe
 tests/host/test_core
+tests/host/test_core2
 tests/host/test_app
 tests/host/mc_sim
 

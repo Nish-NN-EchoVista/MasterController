@@ -1,17 +1,22 @@
 # MasterController
 
 Firmware for a **NUCLEO-H7A3ZI-Q** (STM32H7A3ZIT6Q) that lets one laptop UART
-control **12 EVS2 boards** behind **6 F401 DataControllers**.
+control **6 EVS2 boards**, one behind each of **6 F401 DataControllers**.
+The laptop end can equally be another controller with a 3.3 V UART.
 
 ```
-                          ┌──────────── DC1 ── EVS2 @1,  @2
-                          ├──────────── DC2 ── EVS2 @3,  @4
- Laptop ── USB-UART ── MasterController ─── DC3 ── EVS2 @5,  @6
-          921600 8N1      ├──────────── DC4 ── EVS2 @7,  @8
-                          ├──────────── DC5 ── EVS2 @9,  @10
-                          └──────────── DC6 ── EVS2 @11, @12
+                          ┌──────────── DC1 ── EVS2 @1
+                          ├──────────── DC2 ── EVS2 @2
+ Laptop ── USB-UART ── MasterController ─── DC3 ── EVS2 @3
+          921600 8N1      ├──────────── DC4 ── EVS2 @4
+                          ├──────────── DC5 ── EVS2 @5
+                          └──────────── DC6 ── EVS2 @6
                               57600 8N1 each
 ```
+
+Each EVS2 is wired to its F401's first board port (USART2), so the F401
+knows it as `@1` and tags its output `[ESV2-1]`. The MasterController maps
+that to the system-wide number `@k` / `[ESV2-k]` for DataController *k*.
 
 It is a pure pass-through router. It does not take part in pump, defog or
 sequence logic. Each DataController still runs its current firmware
@@ -22,12 +27,12 @@ unchanged and sees exactly the traffic it would get from a laptop today.
 | Link | UART | MC TX | MC RX | Baud |
 |---|---|---|---|---|
 | Laptop (external USB-UART, 3.3 V) | USART2 | PA2 | PA3 | 921600 |
-| DC1 → EVS2 @1, @2 | USART10 | PE3 | PE2 | 57600 |
-| DC2 → EVS2 @3, @4 | UART7 | PF7 | PF6 | 57600 |
-| DC3 → EVS2 @5, @6 | UART4 | PA0 | PA1 | 57600 |
-| DC4 → EVS2 @7, @8 | UART5 | PB13 | PB12 | 57600 |
-| DC5 → EVS2 @9, @10 | UART9 | PD15 | PD14 | 57600 |
-| DC6 → EVS2 @11, @12 | USART6 | PC6 | PC7 | 57600 |
+| DC1 → EVS2 @1 | USART10 | PE3 | PE2 | 57600 |
+| DC2 → EVS2 @2 | UART7 | PF7 | PF6 | 57600 |
+| DC3 → EVS2 @3 | UART4 | PA0 | PA1 | 57600 |
+| DC4 → EVS2 @4 | UART5 | PB13 | PB12 | 57600 |
+| DC5 → EVS2 @5 | UART9 | PD15 | PD14 | 57600 |
+| DC6 → EVS2 @6 | USART6 | PC6 | PC7 | 57600 |
 | Diagnostics + commands | USART3 | PD8 | PD9 | 115200 (ST-LINK USB VCP, no wiring) |
 
 **Soldering to the morpho through-holes (CN11/CN12)?** Open
@@ -55,22 +60,30 @@ Pins deliberately left alone on this board:
 
 | You send | Goes to | As |
 |---|---|---|
-| `@n <cmd>` (n = 1…12) | EVS2 *n*, i.e. DataController ⌈n/2⌉ | `@1 <cmd>` for odd n, `@2 <cmd>` for even n |
+| `@n <cmd>` (n = 1…6) | EVS2 *n*, i.e. DataController *n* | `@1 <cmd>` (its EVS2 is on the F401's board-1 port) |
 | `#k <cmd>` (k = 1…6) | DataController *k* only | `<cmd>` unchanged (e.g. `#3 enable_pump`, `#2 lockout++`) |
-| `<cmd>` | all six DataControllers | `<cmd>` unchanged (each DC passes it to both boards, as today) |
+| `<cmd>` | all six DataControllers | `<cmd>` unchanged (each DC handles it as it would from a laptop today) |
 | `mc_…` | the MasterController itself | see below |
 
 `@0 …` lines (e.g. `@0 play_all`) are DataController pump commands, so
 they are broadcast to all six DataControllers unchanged.
 
 The MC rejects malformed addresses with an `[MC] E:` line and sends
-nothing. This covers `@13`, `@01`, `@1` with no command, `#7`, and similar.
+nothing. This covers `@7`, `@01`, `@1` with no command, `#7`, and similar,
+and the reply names the valid range:
+`[MC] E: invalid EVS2 address (use @1..@6 <command>), not sent: @7 get volt`.
+
+**Two EVS2s per DataController** is still supported as a build option: set
+`MC_BOARDS_PER_DC` to 2 in `Core/Inc/mc_config.h`. Addressing then becomes
+`@1`…`@12` (DataController ⌈n/2⌉, sent as `@1`/`@2`) and output from both
+F401 board ports is renumbered. `MC_DC_BOARD_SLOT` selects which F401 port
+the single EVS2 uses in the one-board build. The host tests cover both.
 
 ### Running with fewer than six DataControllers
 
 Any number of DataControllers from 0 to 6 can be connected, on any ports,
 and plugged or unplugged while running. Addresses are fixed by port:
-DataController *k* always owns `@(2k−1)`/`@2k`, however many others are
+DataController *k* always owns `@k`, however many others are
 connected. Each port is in one of three states:
 
 | State | Meaning | What you get |
@@ -84,8 +97,8 @@ A DataController that reappears is reported as `I: DCk online`, or
 
 - **Addressed commands** (`@n`, `#k`) to an absent or lost DataController
   are **refused with a reply** instead of vanishing:
-  - `[MC] E: DC6 (port 6) not connected, not sent: @11 start_sweep`
-  - `[MC] E: DC3 (port 3) lost, silent for 5 s, not sent: @5 get volt`
+  - `[MC] E: DC6 (port 6) not connected, not sent: @6 start_sweep`
+  - `[MC] E: DC3 (port 3) lost, silent for 5 s, not sent: @3 get volt`
 
   Each refused command gets its own reply. Only a flood of more than 10
   per second is summarised.
@@ -102,12 +115,12 @@ A DataController that reappears is reported as `I: DCk online`, or
 
   ```
   [MC] dc_status: 4 live, 1 absent, 1 lost
-  [MC]   live   DC1 (port 1, USART10 PE3/PE2, @1,@2) last_rx=212ms
-  [MC]   live   DC2 (port 2, UART7 PF7/PF6, @3,@4) last_rx=180ms
-  [MC]   live   DC4 (port 4, UART5 PB13/PB12, @7,@8) last_rx=95ms
-  [MC]   live   DC5 (port 5, UART9 PD15/PD14, @9,@10) last_rx=402ms
-  [MC]   absent DC6 (port 6, USART6 PC6/PC7, @11,@12)
-  [MC]   lost   DC3 (port 3, UART4 PA0/PA1, @5,@6) silent for 42 s
+  [MC]   live   DC1 (port 1, USART10 PE3/PE2, @1) last_rx=212ms
+  [MC]   live   DC2 (port 2, UART7 PF7/PF6, @2) last_rx=180ms
+  [MC]   live   DC4 (port 4, UART5 PB13/PB12, @4) last_rx=95ms
+  [MC]   live   DC5 (port 5, UART9 PD15/PD14, @5) last_rx=402ms
+  [MC]   absent DC6 (port 6, USART6 PC6/PC7, @6)
+  [MC]   lost   DC3 (port 3, UART4 PA0/PA1, @3) silent for 42 s
   ```
 
   A DataController whose port is not healthy (see
@@ -124,14 +137,18 @@ from connect glitches or baud mismatches; tab is allowed.
 ## Tagging (boards → laptop)
 
 Output from DataController *k* is renumbered so the laptop sees one
-12-board system:
+6-board system:
 
 | DataController *k* sends | Laptop receives |
 |---|---|
-| `[ESV2-1] …` / `[ESV2-2] …` | `[ESV2-(2k−1)] …` / `[ESV2-2k] …` |
-| `TX to ESV2-1: …` / `TX to ESV2-2: …` | `TX to ESV2-(2k−1): …` / `TX to ESV2-2k: …` |
-| `Board1 Temp: …` / `Board2 Temp: …` | `Board(2k−1) Temp: …` / `Board2k Temp: …` |
+| `[ESV2-1] …` | `[ESV2-k] …` |
+| `TX to ESV2-1: …` | `TX to ESV2-k: …` |
+| `Board1 Temp: …` | `Boardk Temp: …` |
 | anything else (`PZT Temp: …`, `I: …`, `[ESV2-0] …`) | `[DC-k] …` |
+
+The F401's second board port has nothing attached. Should it ever print
+anything (`[ESV2-2] …`, `Board2 Temp: …`), the line is passed on untouched
+as `[DC-k] [ESV2-2] …`, so it can never be mistaken for another EVS2.
 
 Lines produced by the MasterController itself start with `[MC] `
 (`I:` info, `W:` warning, `E:` error).
@@ -399,9 +416,9 @@ with a duplicate symbol.
    Replace COM7 with the laptop adapter's port. The script needs pyserial.
 
 It checks:
-- Every `@1`…`@12` and `#1`…`#6` route.
+- Every `@1`…`@6` and `#1`…`#6` route.
 - Broadcast lines arrive at all six DataControllers exactly once.
-- Back-to-back bursts to all 12 boards arrive whole and in order.
+- Back-to-back bursts to all six boards arrive whole and in order.
 - A stop overtakes and discards queued lines: every queued line arrives before it or is reported discarded, and none arrives after it.
 - The full status report (summary plus all seven ports) is present, and every loss and error counter is zero.
 
@@ -431,18 +448,18 @@ python tools/loopback_test.py socket://localhost:5555
    lines every 500 ms. `dc_status` should list it as live.
 4. Run `mc_status`. For every connected port, `fe=` and `ne=` should stay
    at 0. Rising counts point to wiring, grounding or baud problems.
-5. Send `@1 <harmless get command>` and check it reaches only DC1 board 1.
-   Do the same for `@2`, `@12`, `#3 …` and a broadcast.
+5. Send `@1 <harmless get command>` and check it reaches only DC1's EVS2.
+   Do the same for `@2`, `@6`, `#3 …` and a broadcast.
 6. Scope a broadcast on two DataController TX lines to confirm they start
    together.
 7. Queue a few commands, send `stop`, and confirm the discard report and
    that the stop reaches every board.
 
-## PyGUI changes needed to use all 12 boards
+## PyGUI changes needed to use all six boards
 
 - Set `BAUD_DEFAULT` to 921600.
 - PyGUI currently only recognises `[ESV2-1]`/`[ESV2-2]` and addresses
-  `@1`/`@2`. It needs to handle `[ESV2-1]`…`[ESV2-12]`, `@1`…`@12`,
+  `@1`/`@2`. It needs to handle `[ESV2-1]`…`[ESV2-6]`, `@1`…`@6`,
   `BoardN Temp`, and the `[DC-k] PZT Temp` lines (one thermocouple per
   DataController).
 - Lines starting `[MC] ` can be shown in a log or ignored.

@@ -12,13 +12,17 @@ CFLAGS  := -std=c11 -O1 -g -Wall -Wextra -Werror -Wshadow -Wconversion \
 EXE     := $(if $(filter Windows_NT,$(OS)),.exe,)
 
 CORE    := $(SRC)/mc_txq.c $(SRC)/mc_line.c $(SRC)/mc_router.c
-TESTS   := test_core test_app
+TESTS   := test_core test_core2 test_app
 
 .PHONY: all run clean
 all: run
 
 test_core$(EXE): test_core.c $(CORE) mc_test.h
 	$(CC) $(CFLAGS) -o $@ test_core.c $(CORE)
+
+# The routing core again with the two-EVS2-per-DataController option.
+test_core2$(EXE): test_core.c $(CORE) mc_test.h
+	$(CC) $(CFLAGS) -DMC_BOARDS_PER_DC=2u -o $@ test_core.c $(CORE)
 
 test_app$(EXE): test_app.c fake_platform.c fake_platform.h $(CORE) $(SRC)/mc_app.c mc_test.h
 	$(CC) $(CFLAGS) -o $@ test_app.c fake_platform.c $(CORE) $(SRC)/mc_app.c
@@ -30,6 +34,7 @@ mc_sim$(EXE): mc_sim.c $(CORE) $(SRC)/mc_app.c
 
 run: $(addsuffix $(EXE),$(TESTS))
 	./test_core$(EXE)
+	./test_core2$(EXE)
 	./test_app$(EXE)
 
 clean:

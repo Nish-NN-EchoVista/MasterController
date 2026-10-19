@@ -368,14 +368,14 @@
     <header class="hero">
       <p class="eyebrow">Echovista · firmware architecture · NUCLEO-H7A3ZI-Q</p>
       <h1>MasterController <span class="thin">software architecture</span></h1>
-      <p class="lede">One laptop UART in, six DataController UARTs out, twelve EVS2 boards behind them. The MasterController is a pass-through line router. It forwards commands down, merges and renumbers telemetry coming back up, and never joins, splits or silently drops a line.</p>
+      <p class="lede">One laptop (or other controller) UART in, six DataController UARTs out, one EVS2 board behind each. The MasterController is a pass-through line router. It forwards commands down, merges and renumbers telemetry coming back up, and never joins, splits or silently drops a line.</p>
       <ul class="spec" aria-label="Key facts">
         <li><b>STM32H7A3</b> · 280 MHz</li>
         <li><b>7</b> routed UARTs + ST-LINK VCP</li>
         <li><b>921 600</b> baud up · <b>57 600</b> baud down</li>
-        <li><b>@1…@12</b> EVS2 addressing</li>
+        <li><b>@1…@6</b> EVS2 addressing</li>
         <li><b>self-healing</b> UART ports</li>
-        <li><b>487</b> host test checks</li>
+        <li><b>635</b> host test checks</li>
         <li><b>0–6</b> DataControllers, hot-pluggable</li>
         <li>v<b>1.0.0</b> · main</li>
       </ul>
@@ -384,12 +384,12 @@
     <!-- ===================================================== 01 -->
     <section id="overview">
       <div class="sec-head"><span class="sec-no">01</span><h2>System overview</h2></div>
-      <p class="sec-intro">The F401 DataController already routes <code>@1</code>/<code>@2</code> commands to its two EVS2 boards and tags their replies <code>[ESV2-1]</code>/<code>[ESV2-2]</code>. The MasterController repeats that pattern one level up, for six DataControllers. The DataController firmware is unchanged: each one sees exactly the text a laptop would send it today.</p>
+      <p class="sec-intro">The F401 DataController already routes <code>@1</code>/<code>@2</code> commands to its two board ports and tags their replies <code>[ESV2-1]</code>/<code>[ESV2-2]</code>. In this system each F401 has a single EVS2, on its first port, so it always answers as <code>@1</code>/<code>[ESV2-1]</code>. The MasterController repeats the pattern one level up: system-wide EVS2 <code>@k</code> is DataController <em>k</em>'s <code>@1</code>. A build option (<code>MC_BOARDS_PER_DC = 2</code>) restores two EVS2s per DataController and <code>@1…@12</code>. The DataController firmware is unchanged: each one sees exactly the text a laptop would send it today.</p>
 
       <figure>
         <div class="diagram w-900">
           <svg viewBox="0 0 980 352" role="img" aria-labelledby="topo-t">
-            <title id="topo-t">Topology: laptop to MasterController to six DataControllers, each with two EVS2 boards</title>
+            <title id="topo-t">Topology: laptop to MasterController to six DataControllers, each with one EVS2 board</title>
             <defs>
               <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5B9BFF"/></marker>
               <marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#46C2CB"/></marker>
@@ -435,16 +435,16 @@
               <line class="ln" x1="770" y1="206" x2="818" y2="206"/>
               <line class="ln" x1="770" y1="262" x2="818" y2="262"/>
               <line class="ln" x1="770" y1="318" x2="818" y2="318"/>
-              <rect class="b2" x="820" y="18"  width="144" height="40" rx="7"/><text class="t2" x="892" y="43"  text-anchor="middle">EVS2 @1 · @2</text>
-              <rect class="b2" x="820" y="74"  width="144" height="40" rx="7"/><text class="t2" x="892" y="99"  text-anchor="middle">EVS2 @3 · @4</text>
-              <rect class="b2" x="820" y="130" width="144" height="40" rx="7"/><text class="t2" x="892" y="155" text-anchor="middle">EVS2 @5 · @6</text>
-              <rect class="b2" x="820" y="186" width="144" height="40" rx="7"/><text class="t2" x="892" y="211" text-anchor="middle">EVS2 @7 · @8</text>
-              <rect class="b2" x="820" y="242" width="144" height="40" rx="7"/><text class="t2" x="892" y="267" text-anchor="middle">EVS2 @9 · @10</text>
-              <rect class="b2" x="820" y="298" width="144" height="40" rx="7"/><text class="t2" x="892" y="323" text-anchor="middle">EVS2 @11 · @12</text>
+              <rect class="b2" x="820" y="18"  width="144" height="40" rx="7"/><text class="t2" x="892" y="43"  text-anchor="middle">EVS2 @1</text>
+              <rect class="b2" x="820" y="74"  width="144" height="40" rx="7"/><text class="t2" x="892" y="99"  text-anchor="middle">EVS2 @2</text>
+              <rect class="b2" x="820" y="130" width="144" height="40" rx="7"/><text class="t2" x="892" y="155" text-anchor="middle">EVS2 @3</text>
+              <rect class="b2" x="820" y="186" width="144" height="40" rx="7"/><text class="t2" x="892" y="211" text-anchor="middle">EVS2 @4</text>
+              <rect class="b2" x="820" y="242" width="144" height="40" rx="7"/><text class="t2" x="892" y="267" text-anchor="middle">EVS2 @5</text>
+              <rect class="b2" x="820" y="298" width="144" height="40" rx="7"/><text class="t2" x="892" y="323" text-anchor="middle">EVS2 @6</text>
             </g>
           </svg>
         </div>
-        <figcaption><b>Topology.</b> Blue: the laptop link. Cyan: the six DataController links, each running existing, unmodified F401 firmware with two EVS2 boards behind it.</figcaption>
+        <figcaption><b>Topology.</b> Blue: the laptop link. Cyan: the six DataController links, each running existing, unmodified F401 firmware with one EVS2 board behind it.</figcaption>
       </figure>
 
       <div class="grid3">
@@ -463,12 +463,12 @@
           <thead><tr><th>Port</th><th>Link</th><th>UART</th><th>TX</th><th>RX</th><th>Baud</th><th>RX ring</th></tr></thead>
           <tbody>
             <tr><td class="num"><code>0</code></td><td>Laptop (external USB-UART)</td><td>USART2</td><td><code>PA2</code></td><td><code>PA3</code></td><td class="num">921 600</td><td class="num">48 KB · ≈533 ms</td></tr>
-            <tr><td class="num"><code>1</code></td><td>DC1 → EVS2 @1, @2</td><td>USART10</td><td><code>PE3</code></td><td><code>PE2</code></td><td class="num">57 600</td><td class="num">8 KB · ≈1.4 s</td></tr>
-            <tr><td class="num"><code>2</code></td><td>DC2 → EVS2 @3, @4</td><td>UART7</td><td><code>PF7</code></td><td><code>PF6</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
-            <tr><td class="num"><code>3</code></td><td>DC3 → EVS2 @5, @6</td><td>UART4</td><td><code>PA0</code></td><td><code>PA1</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
-            <tr><td class="num"><code>4</code></td><td>DC4 → EVS2 @7, @8</td><td>UART5</td><td><code>PB13</code></td><td><code>PB12</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
-            <tr><td class="num"><code>5</code></td><td>DC5 → EVS2 @9, @10</td><td>UART9</td><td><code>PD15</code></td><td><code>PD14</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
-            <tr><td class="num"><code>6</code></td><td>DC6 → EVS2 @11, @12</td><td>USART6</td><td><code>PC6</code></td><td><code>PC7</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>1</code></td><td>DC1 → EVS2 @1</td><td>USART10</td><td><code>PE3</code></td><td><code>PE2</code></td><td class="num">57 600</td><td class="num">8 KB · ≈1.4 s</td></tr>
+            <tr><td class="num"><code>2</code></td><td>DC2 → EVS2 @2</td><td>UART7</td><td><code>PF7</code></td><td><code>PF6</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>3</code></td><td>DC3 → EVS2 @3</td><td>UART4</td><td><code>PA0</code></td><td><code>PA1</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>4</code></td><td>DC4 → EVS2 @4</td><td>UART5</td><td><code>PB13</code></td><td><code>PB12</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>5</code></td><td>DC5 → EVS2 @5</td><td>UART9</td><td><code>PD15</code></td><td><code>PD14</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
+            <tr><td class="num"><code>6</code></td><td>DC6 → EVS2 @6</td><td>USART6</td><td><code>PC6</code></td><td><code>PC7</code></td><td class="num">57 600</td><td class="num">8 KB</td></tr>
             <tr><td class="num"><code>7</code></td><td>Diagnostics mirror + backup command input</td><td>USART3</td><td><code>PD8</code></td><td><code>PD9</code></td><td class="num">115 200</td><td class="num">4 KB · DMA2</td></tr>
           </tbody>
         </table>
@@ -635,7 +635,7 @@
       <h3>Admission, in two rules</h3>
       <div class="grid2">
         <div class="card"><span class="k">Ordinary lines</span><h4>All-or-nothing</h4><p>Every target queue is checked before any copy is made. A broadcast needs space in every <em>healthy</em> DataController, and each queue always keeps back its 4 reserved slots. If any one is full, none of them receives the line, and the laptop gets one clear <code>busy</code> reply. Quarantined DataControllers are skipped and named in a warning (see <a href="#healing">section 11</a>).</p></div>
-        <div class="card"><span class="k">stop · cancel · @0 stop_all</span><h4>Purge, then jump the queue</h4><p>Unsent ordinary lines for the same boards are discarded and the count is reported. The stop is then placed right behind the line currently on the wire, and behind any earlier stops. It can use the reserved slots.</p></div>
+        <div class="card"><span class="k">stop · cancel · @0 stop_all</span><h4>Purge, then jump the queue</h4><p>Unsent ordinary lines for the same EVS2s are discarded and the count is reported. The stop is then placed right behind the line currently on the wire, and behind any earlier stops. It can use the reserved slots.</p></div>
       </div>
     </section>
 
@@ -666,7 +666,7 @@
 
             <rect class="ba" x="480" y="42" width="190" height="84" rx="9"/>
             <text class="t" x="575" y="68" text-anchor="middle">Retag</text>
-            <text class="ta" x="575" y="90" text-anchor="middle">[ESV2-2] → [ESV2-2k]</text>
+            <text class="ta" x="575" y="90" text-anchor="middle">[ESV2-1] → [ESV2-k]</text>
             <text class="tm" x="575" y="108" text-anchor="middle">otherwise [DC-k] …</text>
 
             <rect class="bc" x="715" y="42" width="190" height="84" rx="9"/>
@@ -709,18 +709,18 @@
       <h3>Laptop → boards</h3>
       <div class="tbl">
         <table>
-          <thead><tr><th>Laptop sends</th><th>Goes to</th><th>Wire text</th><th>Queue tag</th></tr></thead>
+          <thead><tr><th>Laptop sends</th><th>Goes to</th><th>Wire text</th><th>Priority</th></tr></thead>
           <tbody>
-            <tr><td><code>@7 start_sweep</code></td><td>DC4 (⌈7/2⌉), its board 1</td><td><code>@1 start_sweep</code></td><td>board 1</td></tr>
-            <tr><td><code>@12 get freq</code></td><td>DC6, its board 2</td><td><code>@2 get freq</code></td><td>board 2</td></tr>
-            <tr><td><code>#3 enable_pump</code></td><td>DC3 only</td><td><code>enable_pump</code></td><td>both</td></tr>
-            <tr><td><code>start_defog</code>, <code>@0 play_all</code></td><td>all six DataControllers</td><td>unchanged</td><td>both</td></tr>
+            <tr><td><code>@4 start_sweep</code></td><td>DC4, its EVS2</td><td><code>@1 start_sweep</code></td><td>normal</td></tr>
+            <tr><td><code>@6 get freq</code></td><td>DC6, its EVS2</td><td><code>@1 get freq</code></td><td>normal</td></tr>
+            <tr><td><code>#3 enable_pump</code></td><td>DC3 only</td><td><code>enable_pump</code></td><td>normal</td></tr>
+            <tr><td><code>start_defog</code>, <code>@0 play_all</code></td><td>all six DataControllers</td><td>unchanged</td><td>normal</td></tr>
             <tr><td><code>stop</code>, <code>cancel</code>, <code>@0 stop_all</code></td><td>as addressed</td><td>unchanged</td><td><span class="pill crit">urgent</span></td></tr>
             <tr><td><code>mc_status</code>, <code>dc_status</code> …</td><td>the MasterController</td><td>—</td><td>—</td></tr>
-            <tr><td><code>@11 start_sweep</code>, DC6 absent</td><td>nowhere</td><td><code>[MC] E: DC6 (port 6) not connected, not sent</code></td><td>—</td></tr>
-            <tr><td><code>@5 get volt</code>, DC3 lost</td><td>nowhere</td><td><code>[MC] E: DC3 (port 3) lost, silent for 5 s, not sent</code></td><td>—</td></tr>
-            <tr><td><code>@12 stop</code>, DC6 absent or lost</td><td>DC6, always</td><td><code>@2 stop</code> (with a warning if lost)</td><td><span class="pill crit">urgent</span></td></tr>
-            <tr><td><code>@13 x</code>, <code>@01 x</code>, <code>#7 x</code>, <code>@1</code></td><td>nowhere</td><td><code>[MC] E: invalid … address</code></td><td>—</td></tr>
+            <tr><td><code>@6 start_sweep</code>, DC6 absent</td><td>nowhere</td><td><code>[MC] E: DC6 (port 6) not connected, not sent</code></td><td>—</td></tr>
+            <tr><td><code>@3 get volt</code>, DC3 lost</td><td>nowhere</td><td><code>[MC] E: DC3 (port 3) lost, silent for 5 s, not sent</code></td><td>—</td></tr>
+            <tr><td><code>@6 stop</code>, DC6 absent or lost</td><td>DC6, always</td><td><code>@1 stop</code> (with a warning if lost)</td><td><span class="pill crit">urgent</span></td></tr>
+            <tr><td><code>@7 x</code>, <code>@01 x</code>, <code>#7 x</code>, <code>@1</code></td><td>nowhere</td><td><code>[MC] E: invalid … address (use @1..@6 …)</code></td><td>—</td></tr>
           </tbody>
         </table>
       </div>
@@ -729,10 +729,10 @@
         <table>
           <thead><tr><th>DataController k sends</th><th>Laptop receives</th><th>Example for k = 3</th></tr></thead>
           <tbody>
-            <tr><td><code>[ESV2-1] …</code> / <code>[ESV2-2] …</code></td><td><code>[ESV2-(2k−1)]</code> / <code>[ESV2-2k]</code></td><td><code>[ESV2-5] Evaporation Sweep Completed</code></td></tr>
-            <tr><td><code>TX to ESV2-1: …</code></td><td><code>TX to ESV2-(2k−1): …</code></td><td><code>TX to ESV2-5: start_sweep</code></td></tr>
-            <tr><td><code>Board2 Temp: …</code></td><td><code>Board2k Temp: …</code></td><td><code>Board6 Temp: 31.2</code></td></tr>
-            <tr><td>anything else</td><td><code>[DC-k] …</code></td><td><code>[DC-3] PZT Temp: 24.5 C</code></td></tr>
+            <tr><td><code>[ESV2-1] …</code></td><td><code>[ESV2-k] …</code></td><td><code>[ESV2-3] Evaporation Sweep Completed</code></td></tr>
+            <tr><td><code>TX to ESV2-1: …</code></td><td><code>TX to ESV2-k: …</code></td><td><code>TX to ESV2-3: start_sweep</code></td></tr>
+            <tr><td><code>Board1 Temp: …</code></td><td><code>Boardk Temp: …</code></td><td><code>Board3 Temp: 31.2</code></td></tr>
+            <tr><td>anything else, including output tagged for the F401's unused second port</td><td><code>[DC-k] …</code></td><td><code>[DC-3] PZT Temp: 24.5 C</code><br><code>[DC-3] [ESV2-2] …</code></td></tr>
           </tbody>
         </table>
       </div>
@@ -751,7 +751,7 @@
         <span class="q-arrow">→</span>
         <div class="slot urg"><small>urgent · 2nd</small>cancel</div>
         <span class="q-arrow">→</span>
-        <div class="slot ord"><small>ordinary · board 2</small>@2 get volt</div>
+        <div class="slot ord"><small>ordinary · sent after the stops</small>@1 get volt</div>
         <span class="q-arrow">→</span>
         <div class="slot gone"><small>purged by stop</small>@1 upload_line_18</div>
       </div>
@@ -760,7 +760,7 @@
         <li><strong>Locked head:</strong> the line currently being sent can never be moved or purged.</li>
         <li><strong>Front insert:</strong> <code>push_front</code> is used only for the CRLF that ends an aborted line. It goes ahead of everything, including waiting stops.</li>
         <li><strong>Urgent lines:</strong> they go after the head and after earlier urgent lines, so stops keep the order they were sent in. Urgent lines are never purged, so a later stop can't erase an earlier one.</li>
-        <li><strong>Purge:</strong> removes only ordinary lines whose board tag overlaps the stop's target, and reports how many.</li>
+        <li><strong>Purge:</strong> removes the ordinary lines queued before the stop for the EVS2s it targets (with one EVS2 per DataController, everything ordinary on that queue), and reports how many.</li>
         <li><strong>Reserve:</strong> ordinary traffic may only use a queue while more than 4 slots are free, so a stop always has room.</li>
       </ul>
     </section>
@@ -1014,7 +1014,7 @@
       <div class="grid2">
         <div class="card"><span class="k">Step 1 · rebuild</span><h4>Reset just that UART</h4><p>The HAL de-init tears down the clock, pins, DMA stream and IRQ. The RCC reset line of that one peripheral is pulsed, then the CubeMX init runs again from the saved settings, followed by the same FIFO, CR3 and RX-DMA setup as at boot. The other ports never notice.</p></div>
         <div class="card"><span class="k">Step 2 · probation</span><h4>Prove it works</h4><p>For 3 s the port must stay fault-free and send at least one line. If nothing is queued, an empty line is sent: the DataController and GUI both ignore it. Any hard fault during probation means the rebuild didn't help.</p></div>
-        <div class="card"><span class="k">Step 3 · quarantine</span><h4>Isolate and retry</h4><p>The platform stops driving the port, its unsent ordinary lines are discarded, and its two EVS2 boards are reported unavailable. It is probed again after 5 s, then 10, 20, 40 and 60 s. Each probe is a full rebuild followed by probation.</p></div>
+        <div class="card"><span class="k">Step 3 · quarantine</span><h4>Isolate and retry</h4><p>The platform stops driving the port, its unsent ordinary lines are discarded, and its EVS2 is reported unavailable. It is probed again after 5 s, then 10, 20, 40 and 60 s. Each probe is a full rebuild followed by probation.</p></div>
         <div class="card"><span class="k">Last resort</span><h4>Board-wide faults</h4><p>Three or more DataController ports failing together points at the board itself, such as its clock or power. The MC resets once and reports <code>PORT_FAULTS</code> at the next boot. If it happens again before a power cycle, it stays up and keeps probing rather than looping through resets.</p></div>
       </div>
 
@@ -1048,17 +1048,17 @@
 <pre class="term"><span class="p">&gt;</span> <span class="a">mc_status</span>
 <span class="c">[MC] status up=412s reset=POWER_ON loop_max=0ms mc_lost=0 busy=0</span>
 <span class="c">[MC] PC  USART2 PA2/PA3 921600 baud rx=18344 lines=611 tx=5210 q=0/256 overlong=0 binary=0 garbled=0 uart_err_lines=0 fe=0 ne=0 overruns=0 stalls=0 health=OK recoveries=0</span>
-<span class="c">[MC] DC1 USART10 PE3/PE2 online @1,@2 last_rx=212ms rx=40211 lines=1733 up_drop=0 tx=94 q=0/96 rejected=0 purged=0 overlong=0 binary=0 fe=0 ne=0 overruns=0 dma_restarts=0 stalls=0 health=OK recoveries=0 quarantines=0</span>
+<span class="c">[MC] DC1 USART10 PE3/PE2 online @1 last_rx=212ms rx=40211 lines=1733 up_drop=0 tx=94 q=0/96 rejected=0 purged=0 overlong=0 binary=0 fe=0 ne=0 overruns=0 dma_restarts=0 stalls=0 health=OK recoveries=0 quarantines=0</span>
 <span class="p">…</span>
-<span class="w">[MC] W: DC4 (port 4, UART5 PB13/PB12, @7,@8) lost: silent for 3004 ms</span>
+<span class="w">[MC] W: DC4 (port 4, UART5 PB13/PB12, @4) lost: silent for 3004 ms</span>
 <span class="w">[MC] W: 'stop' discarded 3 queued line(s) for DC2</span>
 <span class="x">[MC] E: busy (DC3 queue full), not sent: start_sweep</span>
 <span class="p">&gt;</span> <span class="a">dc_status</span>
 <span class="c">[MC] dc_status: 4 live, 1 absent, 1 lost</span>
-<span class="c">[MC]   live   DC1 (port 1, USART10 PE3/PE2, @1,@2) last_rx=212ms</span>
+<span class="c">[MC]   live   DC1 (port 1, USART10 PE3/PE2, @1) last_rx=212ms</span>
 <span class="p">…</span>
-<span class="c">[MC]   absent DC6 (port 6, USART6 PC6/PC7, @11,@12)</span>
-<span class="w">[MC]   lost   DC4 (port 4, UART5 PB13/PB12, @7,@8) silent for 42 s</span></pre>
+<span class="c">[MC]   absent DC6 (port 6, USART6 PC6/PC7, @6)</span>
+<span class="w">[MC]   lost   DC4 (port 4, UART5 PB13/PB12, @4) silent for 42 s</span></pre>
       <p class="stack-note">Sample output for illustration, not captured from a board.</p>
       <div class="grid2">
         <div class="card"><span class="k">Commands</span><h4><code>dc_status</code> · <code>mc_status</code> · <code>mc_ping</code> · <code>mc_version</code> · <code>mc_reset_stats</code> · <code>mc_recover</code> · <code>mc_pace</code> · <code>mc_help</code></h4><p>A status report has one summary line and one line per port. Every counter and each port's <code>health=</code> state are listed, so the commissioning script can require each counter to be zero and every port to be OK.</p></div>
@@ -1071,7 +1071,7 @@
       <div class="sec-head"><span class="sec-no">13</span><h2>Verification</h2></div>
       <p class="sec-intro">Because the platform contract is so small, the same application code runs in three places: on the board, against a scripted fake, and inside a real-time simulator.</p>
       <div class="grid3">
-        <div class="card"><span class="k">tests/host · C</span><h4>Unit &amp; app tests</h4><p>487 checks. <code>test_core</code> covers the queue, line builder and router. <code>test_app</code> covers the full application against the fake, with injected stalls, refusals, UART errors, DMA restarts and failures, overruns and congestion. It walks every step of the recovery ladder, including quarantine, backoff, recovery and the board reset. Built with <code>-Werror -Wconversion</code>.</p></div>
+        <div class="card"><span class="k">tests/host · C</span><h4>Unit &amp; app tests</h4><p>635 checks. <code>test_core</code> covers the queue, line builder and router; it is built twice, for one and for two EVS2s per DataController. <code>test_app</code> covers the full application against the fake, with injected stalls, refusals, UART errors, DMA restarts and failures, overruns and congestion. It walks every step of the recovery ladder, including quarantine, backoff, recovery and the board reset. Built with <code>-Werror -Wconversion</code>.</p></div>
         <div class="card"><span class="k">tests/host · mc_sim</span><h4>Simulator</h4><p>The real core behind a TCP socket, with DataController ports looped back and wire time emulated at each port's baud rate. It speaks to pyserial as <code>socket://localhost:5555</code>.</p></div>
         <div class="card"><span class="k">tools · Python</span><h4>Loopback commissioning</h4><p>With TX-to-RX jumpers on each DataController port, it checks every route, broadcast atomicity, burst ordering and stop behavior, and requires a complete status report with every loss counter at zero. It also requires every port to report <code>health=OK</code>. A self-test with 15 cases confirms it fails when the report is bad.</p></div>
       </div>

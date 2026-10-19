@@ -29,6 +29,16 @@ except ImportError:
     sys.exit("pyserial is required: pip install pyserial")
 
 NUM_DC = 6
+BOARDS_PER_DC = 1          # must match MC_BOARDS_PER_DC in Core/Inc/mc_config.h
+DC_BOARD_SLOT = 1          # MC_DC_BOARD_SLOT (used when BOARDS_PER_DC == 1)
+NUM_BOARDS = NUM_DC * BOARDS_PER_DC
+
+
+def board_route(n):
+    """EVS2 @n -> (DataController, the "@1"/"@2" the F401 receives)."""
+    dc = (n - 1) // BOARDS_PER_DC + 1
+    slot = DC_BOARD_SLOT if BOARDS_PER_DC == 1 else (n - 1) % BOARDS_PER_DC + 1
+    return dc, slot
 
 
 class Link:
@@ -104,16 +114,16 @@ def main():
     ok &= any("pong" in m for m in mc)
     print(f"  {'PASS' if ok else 'FAIL'} [MC] pong")
 
-    print("addressing: every @n reaches only its DataController, as @1/@2")
+    print(f"addressing: every @1..@{NUM_BOARDS} reaches only its DataController")
     link.wake()
     expected, got = [], []
     for r in range(a.rounds):
         this_round = []
-        for n in range(1, 2 * NUM_DC + 1):
+        for n in range(1, NUM_BOARDS + 1):
             tag = f"t{r}-{n}"
             link.send(f"@{n} {tag}")
-            dc, board = (n + 1) // 2, 1 if n % 2 else 2
-            this_round.append(f"[DC-{dc}] @{board} {tag}")
+            dc, slot = board_route(n)
+            this_round.append(f"[DC-{dc}] @{slot} {tag}")
         g, _ = link.collect(2.0, want=len(this_round))
         got += g
         expected += this_round
@@ -138,13 +148,14 @@ def main():
     link.wake()
     expected = []
     for i in range(a.burst):
-        for n in range(1, 2 * NUM_DC + 1):
+        for n in range(1, NUM_BOARDS + 1):
             payload = f"burst-{n}-{i}-" + "x" * 60
             link.send(f"@{n} {payload}")
-            expected.append(f"[DC-{(n + 1) // 2}] @{1 if n % 2 else 2} {payload}")
+            dc, slot = board_route(n)
+            expected.append(f"[DC-{dc}] @{slot} {payload}")
     got, mc = link.collect(10.0, want=len(expected))
     ok &= expect_set("burst lines", got, expected)
-    for n in range(1, 2 * NUM_DC + 1):
+    for n in range(1, NUM_BOARDS + 1):
         seq = [int(m.group(1)) for line in got
                if (m := re.search(rf" burst-{n}-(\d+)-", line))]
         if seq != sorted(seq):
